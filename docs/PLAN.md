@@ -467,7 +467,7 @@ stream is lossless.
 | 2 | **Upstream:** exchange route + `auth/config` discovery fields + DCR shim (§4.4). **Here:** Streamable HTTP, protected resource metadata, 401 challenge, exchange + cache | Live E2E against a real IdP; Claude Desktop custom connector completes its OAuth handshake |
 | 3 | Write tools behind `read_only`, resources, prompts | Full triage loop, live E2E |
 | 4 | Live match subscriptions (§8) | Flagged, off by default |
-| — | `operationId`s upstream + matching merkleye-ui PR (§3.2) | Can land any time; earlier is cheaper |
+| — | `operationId`s upstream + matching merkleye-ui PR (§3.2) | Spec side open as [merkleye/merkleye#48](https://github.com/Merkleye/merkleye/pull/48); merkleye-ui PR still needed |
 
 Phase 1 is deliberately shippable alone: bearer-only, stdio-only, read-only is
 genuinely useful and validates the tool surface before OAuth lands.
@@ -478,8 +478,11 @@ genuinely useful and validates the tool surface before OAuth lands.
    on it either way.
 2. **DCR shim (§4.4.2) — in scope for that same PR?** Recommend yes; without
    an answer, Claude Desktop only works against DCR-capable IdPs.
-3. **`operationId`s (§3.2) — upstream, or a local name map?** Upstream needs a
-   coordinated merkleye-ui PR because generated symbols all rename.
+3. **`operationId`s (§3.2) — done upstream.**
+   [merkleye/merkleye#48](https://github.com/Merkleye/merkleye/pull/48) adds
+   all 63 and makes `make spec` fail without one. Still needs a coordinated
+   merkleye-ui PR before it merges, because every generated symbol there
+   renames.
 4. **Does the group→scope mapping become configurable?** Currently a hardcoded
    `merkleye-admin` / `merkleye_admins` list, which "any OIDC IdP" outgrows
    immediately.
