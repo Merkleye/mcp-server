@@ -1,0 +1,8 @@
+# The generated Merkleye API client: ~16k lines, fully derived from
+# api/openapi.yaml. Same reasoning as merkleye's /ent/* — a generated artifact
+# in the diff hides the change that produced it, and a stale committed copy is
+# a contract drift waiting to happen. `mise run generate` after a clone.
+/internal/merkleyeapi/client.gen.go
+
+/merkleye-mcp
+/dist/

@@ -1,0 +1,13 @@
+# Generates internal/merkleyeapi/client.gen.go from api/openapi.yaml.
+#
+# Only models + client: the response-parsing layer (`client-with-responses`) is
+# deliberately off. Tool results are projected into compact JSON for an agent
+# (see internal/mcpserver), not mapped field-by-field into Go structs, so 60
+# typed response wrappers would be dead weight. Request construction still
+# comes from the generated client, which is where the operationIds earn their
+# keep — ListDomainMatches, not GetApiV1DomainsIdMatches.
+package: merkleyeapi
+output: internal/merkleyeapi/client.gen.go
+generate:
+  models: true
+  client: true

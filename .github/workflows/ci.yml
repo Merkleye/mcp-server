@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # mise provisions the exact toolchain pinned in mise.toml, and CI runs
+      # the same tasks a contributor runs locally — there is no second
+      # definition of what "check" means.
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.8.1
+          install: true
+          cache: true
+
+      - run: mise run generate
+      - run: mise run fmt-check
+      - run: mise run vet
+
+      # Lint goes through the action rather than `mise run lint`, matching
+      # merkleye. The golangci-lint release pinned in mise.toml is itself built
+      # with an older Go than this module targets, and refuses to load a
+      # newer-than-itself language version ("the Go language version used to
+      # build golangci-lint is lower than the targeted Go version"). The action
+      # fetches a build that matches the runner's toolchain. `mise run lint`
+      # stays for local use and starts working once the pinned release catches
+      # up — see AGENTS.md.
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          args: --timeout=5m
+
+      - run: mise run test
+
+  govulncheck:
+    name: Vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.8.1
+          install: true
+          cache: true
+      - run: mise run govulncheck
+
+  spec:
+    name: OpenAPI spec drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+
+      # The authoritative drift gate. The local hook skips this when it cannot
+      # reach the network; here it always runs, because a vendored spec that
+      # has quietly diverged from upstream is the exact failure this repo's
+      # split exists to prevent — the client would generate cleanly against a
+      # contract the server no longer serves.
+      - name: Verify the vendored spec matches its pinned upstream
+        run: mise run spec || ./scripts/check-spec-drift.sh
+
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile
+          push: false
+          platforms: linux/amd64
