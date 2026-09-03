@@ -185,56 +185,77 @@ Per the MCP authorization spec, with the SDK doing the mechanical parts:
   its rule that an unmapped group falls back to a configured default that is
   never allowed to be `admin`. Unrecognised groups must not fail open.
 
-### 4.4 Turning an OIDC identity into Merkleye authority — decision needed
+### 4.4 Turning an OIDC identity into Merkleye authority
 
-This is the one genuinely open architectural question, because **merkleye's
-API today accepts only bearer tokens.** `internal/api.NewAuthenticator` says
-so outright: "OIDC code exchange is still unimplemented … that lands as its
-own piece of work." The `api_tokens` row already carries `issued_via` and
-`idp_subject`, so the data model anticipates OIDC-issued rows; nothing mints
-them yet.
+**Merkleye's OIDC support is half-built and unexercised.** The plumbing is
+there; the thing that mints an OIDC-issued token is not. Confirmed against
+`main` (`7b3bea0`):
 
-**Option A — token exchange in merkleye (recommended).**
-Add one route upstream: `POST /api/v1/auth/token/exchange`, RFC 8693-shaped.
-It takes a validated OIDC access token, maps groups to scopes via the
-existing `ScopesFromGroups`, and mints a short-lived `api_tokens` row with
-`issued_via="oidc"`, `idp_subject=<sub>`, and
-`expires_at = min(token exp, configured cap)`. The MCP server exchanges once
-per caller identity and caches until shortly before expiry.
+| Piece | State |
+| --- | --- |
+| `ent/schema/ops.go` | Ready. `issued_via` enum `{bearer, oidc}`, `idp_subject` "recorded for audit when issued_via=oidc". No migration needed. |
+| `internal/config` | Ready. Full `OIDCAuth` (issuer, client id/secret, scopes, group claim, default scope) with strict validation — `issuer_url`/`client_id` required when enabled, `default_scope` refused if `admin` so unmapped groups cannot fail open. |
+| `internal/api.ScopesFromGroups` | Written, correct, **zero production callers.** Only tests call it. |
+| `internal/api.Authenticator.Middleware` | Reads `issued_via=="oidc"` and prefers `idp_subject` as the Principal subject. Tested — but only against a hand-built store record. |
+| The exchange itself | **Does not exist.** No route mints an OIDC row. `NewAuthenticator`'s own comment says so: "OIDC code exchange is still unimplemented … that lands as its own piece of work." |
 
-- One permission model, exactly as DESIGN §11 already specifies.
-- Audit rows attribute to the human's IdP subject, not a shared service
-  account — which is the difference between an audit log and a log.
-- It is the same exchange the browser OIDC flow will need, so this is work
-  the core repo owes itself regardless; MCP is just the first caller.
-- Cost: an upstream route + handler + spec entry + `make test-contract` pass.
-  Probably no migration — the columns exist, to be confirmed against
-  `ent/schema`.
+So this is not a choice between three designs. Two of the three are already
+half-decided by what is on disk, and the work is *finishing an existing path*
+rather than introducing one.
+
+**Option A — finish the exchange upstream (recommended).**
+Add `POST /api/v1/auth/token/exchange` (RFC 8693-shaped) to
+`merkleye/merkleye`: validated OIDC access token in, short-lived `api_tokens`
+row out with `issued_via="oidc"`, `idp_subject=<sub>`, and
+`expires_at = min(token exp, configured cap)`. Scopes come from the existing
+`ScopesFromGroups`. The MCP server exchanges once per caller identity and
+caches until shortly before expiry.
+
+- Every dependency already exists — schema, config, validation, scope
+  mapping, and the Principal branch that reads the result. This is one route,
+  one handler, one spec entry, and the first production caller of code that
+  has been sitting unused.
+- One permission model, exactly as DESIGN §11 specifies.
+- Audit rows attribute to the human's IdP subject rather than a shared
+  service account — the difference between an audit log and a log.
+- The browser OIDC flow needs the same exchange, so MCP is the first caller,
+  not a special case.
 
 **Option B — MCP holds a service token and enforces scopes itself.**
-One Merkleye token in config; the MCP server maps groups to scopes and
-refuses tool calls above the caller's level.
-
-- Rejected as the default. It is a second permission model in a second repo,
-  drifting from the first the day either changes, and every audit row reads
-  as the service account, so the log cannot answer "who acknowledged this."
-- Keep as an explicitly-flagged fallback (`auth.oidc.mode: service_token`)
-  for deployments that cannot upgrade the core, logging a loud warning on
-  every startup, the way `certstream`'s `calidog_public` source does.
+Rejected as the default: a second permission model in a second repo, drifting
+from the first the day either changes, and every audit row reads as the
+service account so the log cannot answer "who acknowledged this." Keep as an
+explicitly-flagged fallback (`auth.oidc.mode: service_token`) for deployments
+that cannot upgrade the core, logging a loud warning on every startup the way
+`certstream`'s `calidog_public` source does.
 
 **Option C — merkleye validates OIDC JWTs directly on every request.**
-Extend `Authenticator.Middleware` to accept a JWT bearer; the MCP server
-becomes a pure pass-through for both credential types.
+Thinnest MCP server, and arguably where this ends up eventually. But it puts
+JWKS validation in the hot path of every API request, and we still need our
+own audience validation to be a compliant MCP resource server — so it deletes
+§4.4, not §4.3. Revisit when browser OIDC lands.
 
-- Thinnest MCP server, and arguably where this belongs eventually.
-- But it puts JWKS validation in the hot path of every API request, and we
-  still need our own audience validation to be a compliant MCP resource
-  server — so it does not actually delete §4.3, it only deletes §4.4.
-- Revisit when browser OIDC lands upstream.
+**Recommendation: A.**
 
-**Recommendation: A**, because it is the design already recorded upstream
-rather than a new one, and because it is the only option where the audit log
-names a person.
+#### 4.4.1 "Untested" is a real risk, and one confirmed bug
+
+Nothing exercises the OIDC path end to end today, so phase 2 cannot treat the
+existing pieces as known-good — it has to be the first thing that proves them.
+Two specific consequences:
+
+- **`GET /api/v1/auth/config` advertises a route that does not exist.**
+  `handleAuthConfig` returns `login_url: "/api/v1/auth/login"` whenever
+  `auth.oidc.enabled` is true, and `internal/api/router.go` registers only
+  `/api/v1/auth/config` and `/api/v1/auth/me`. Enable OIDC in config today
+  and the UI is pointed at a 404. Worth an upstream fix on its own; it also
+  means the exchange work should settle what actually lives under
+  `/api/v1/auth/*` rather than adding a third half-route.
+- **`ScopesFromGroups` has never run against a real IdP's claims.** Its unit
+  tests feed it Go string slices. Whether Authentik emits the group claim
+  under the configured name, as strings rather than objects, with the casing
+  the mapping expects, is unverified. The live E2E in §8 is where that gets
+  settled — per merkleye's own rule that a mock passing is necessary and
+  never sufficient.
 
 ### 4.5 Write safety
 
@@ -343,7 +364,7 @@ than implying the stream is lossless.
 | --- | --- | --- |
 | 0 | Repo scaffold, mise/Makefile/CI/lint, vendored spec, generated client, drift job | `make check` green on an empty tool set |
 | 1 | stdio transport, bearer pass-through, read-only triage tools | An agent can answer "what matched this week" against a local merkleyed |
-| 2 | Streamable HTTP, OIDC resource server (§4.3), resource metadata, audience binding | Live E2E against a real IdP; **depends on the §4.4 decision** |
+| 2 | Upstream exchange route (§4.4), then Streamable HTTP, OIDC resource server (§4.3), resource metadata, audience binding | Live E2E against a real IdP — the **first** exercise of merkleye's OIDC path, so it proves `ScopesFromGroups` and the `issued_via="oidc"` row as well as our own code |
 | 3 | Write tools behind `read_only`, resources, prompts | Full triage loop, live E2E |
 | 4 | Live match subscriptions (§7) | Flagged, off by default |
 
@@ -352,9 +373,12 @@ is genuinely useful and validates the tool surface before OIDC lands.
 
 ## 10. Decisions needed before phase 2
 
-1. **§4.4 — Option A, B, or C?** A needs an upstream PR to
-   `merkleye/merkleye` (one route, spec entry, contract test). This is the
-   critical path for OIDC and nothing in phase 2 starts without it.
+1. **§4.4 — confirmed as Option A.** Upstream is already extended for OIDC
+   (schema, config, validation, scope mapping) but nothing exercises it, so
+   the remaining work is the exchange route itself: one route, one handler,
+   one spec entry, one `make test-contract` pass in `merkleye/merkleye`.
+   This is the critical path — nothing in phase 2 starts without it. Still
+   open: whether that PR is ours to open or the core team's.
 2. **IdP** — is Authentik the only target, or must multiple issuers be
    supported concurrently?
 3. **Deployment topology** — sidecar next to `merkleyed` on loopback, or an
@@ -362,9 +386,13 @@ is genuinely useful and validates the tool surface before OIDC lands.
    the resource identifier and therefore the audience check.
 4. **`operationId`s upstream** — yes, or a local name map? (§3.1)
 
-Working assumption on all of them, if no answer arrives: A, Authentik-only
-with the config shaped for multi-issuer later, independently exposed, and
+Working assumption on the rest, if no answer arrives: Authentik-only with the
+config shaped for multi-issuer later, independently exposed, and
 `operationId`s contributed upstream.
+
+Separately, and not blocking: `GET /api/v1/auth/config` advertising a
+nonexistent `/api/v1/auth/login` (§4.4.1) is an upstream bug that exists
+today regardless of this repo.
 
 ## 11. Deliberately deferred
 
