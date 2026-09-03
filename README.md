@@ -11,8 +11,14 @@ from `api/openapi.yaml` in the core repo, which is the product boundary.
 
 Authenticates callers two ways: Merkleye API bearer tokens (passed through to
 the API, which is the only thing that can verify them) and OIDC access tokens
-from the deployment's identity provider, where this server acts as an OAuth
-2.1 resource server.
+from any OIDC-compliant identity provider. All IdP knowledge lives in the
+Merkleye backend — this server acts as an OAuth 2.1 resource server for
+discovery and challenge only, and exchanges a caller's OIDC token for a scoped
+Merkleye token rather than validating it itself.
+
+One Go binary, distributed as a container image, an `npx`-able npm launcher,
+and plain release binaries. Speaks Streamable HTTP and stdio, so it works with
+Claude Code, Claude Desktop and LiteLLM without a per-client build.
 
 ## Status
 
