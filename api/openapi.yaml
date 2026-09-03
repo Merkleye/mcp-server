@@ -1,0 +1,3052 @@
+openapi: 3.1.0
+
+# This spec is the product boundary. merkleye-ui consumes this and nothing else
+# — it generates its client from this file in CI and fails the build on drift.
+# That discipline is what makes the two-repo split enforce a contract rather
+# than just add friction. Published as a release artifact on every tagged
+# release, not merely committed, so integrators always have a fetchable
+# versioned contract. See DESIGN §11.
+
+info:
+  title: Merkleye API
+  version: 0.1.0
+  description: |
+    Certificate Transparency watchtower.
+
+    **Write authority.** Domains, issuer policies, the allowlist, variant
+    generator settings, scoring thresholds, and notification
+    channels/settings are all Postgres-owned and fully API-writable, with
+    no config.yaml counterpart. Match triage (acknowledge,
+    allowlist-from-match) is fully API-driven too. Every route — read and
+    write — works today. See DESIGN §13.
+
+    **Timestamps.** Every timestamp in every request and response is RFC 3339,
+    UTC, Z-suffixed (`2026-08-19T02:07:00Z`). Never a Unix epoch, never a
+    local-time string.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local deployment
+
+security:
+  - bearerToken: []
+  - cookieAuth: []
+
+tags:
+  - name: auth
+  - name: domains
+  - name: variants
+  - name: findings
+  - name: allowlist
+  - name: notifications
+  - name: settings
+  - name: ops
+
+paths:
+  /health:
+    get:
+      tags: [ops]
+      operationId: getHealth
+      summary: Liveness
+      security: []
+      responses:
+        "200":
+          description: Process is up. May still report a tripped ingestion watchdog.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /ready:
+    get:
+      tags: [ops]
+      operationId: getReadiness
+      summary: Readiness
+      description: |
+        Returns 503 when the ingestion watchdog is tripped. A tripped watchdog
+        means ingestion itself has gone silent, so Merkleye is not actually
+        watching anything — reporting ready in that state would be a lie.
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: Ingestion stalled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /metrics:
+    get:
+      tags: [ops]
+      operationId: getMetrics
+      summary: Prometheus metrics
+      security: []
+      responses:
+        "200":
+          description: Metrics in Prometheus text format
+          content:
+            text/plain: {}
+
+  /api/v1/domains:
+    get:
+      tags: [domains]
+      operationId: listDomains
+      summary: List watched domains
+      description: |
+        Keyset-paginated over domains matching `status` by `id`, ascending
+        — the same way `/domains/{id}/matches` paginates matches: `cursor`
+        is the `id` of the last item on the previous page, and `next` is
+        this request re-encoded with `cursor` advanced.
+      parameters:
+        - name: status
+          in: query
+          description: |
+            `live` (default): only non-deleted domains, this route's only
+            behavior before this parameter existed. `deleted`: only
+            soft-deleted domains — the only way to discover a deleted
+            domain's `id` at all, since GET /domains/{id} stops returning
+            it and no other route lists it. Needed before
+            POST /domains/{id}/restore or DELETE /domains/{id}/purge can be
+            called on a domain a client doesn't already have the id for
+            (e.g. after a page reload, or in a different session, from the
+            one that deleted it). `all`: both.
+          schema: { type: string, enum: [live, deleted, all], default: live }
+        - name: cursor
+          in: query
+          description: The `id` of the last item on the previous page (from `next_cursor`).
+          schema: { type: integer }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+        - name: page
+          in: query
+          description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
+          schema: { type: integer, minimum: 1, maximum: 2147483647 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  domains:
+                    type: array
+                    items: { $ref: "#/components/schemas/Domain" }
+                  next_cursor: { type: [string, "null"] }
+                  next:
+                    type: [string, "null"]
+                    description: |
+                      The full request path + query string for the next page —
+                      this request's own `limit`, plus `cursor`. Null when
+                      there is no next page.
+                  total:
+                    type: integer
+                    description: Row count matching the current filters, independent of cursor/limit/page.
+        "400": { $ref: "#/components/responses/BadRequest" }
+    post:
+      tags: [domains]
+      operationId: createDomain
+      summary: Create a watched domain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DomainCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Domain" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/domains/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [domains]
+      operationId: getDomain
+      summary: Get a watched domain
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Domain" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [domains]
+      operationId: updateDomain
+      summary: Update a watched domain
+      description: Partial update — include_subdomains and/or enabled. Domain name and issuer policy are immutable here; see PUT .../policies for the latter.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DomainPatch" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Domain" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [domains]
+      operationId: deleteDomain
+      summary: Soft-delete a watched domain
+      description: |
+        Sets a deletion marker; the row and every match/variant/policy that
+        references it are untouched, and GET simply stops returning it.
+        Reversible via POST .../restore. See DELETE .../purge for the
+        permanent version.
+      responses:
+        "204": { description: No Content }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/domains/{id}/restore:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [domains]
+      operationId: restoreDomain
+      summary: Restore a soft-deleted domain
+      description: Undoes DELETE /domains/{id}. 404 for a domain that is live (nothing to restore) or does not exist.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Domain" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/domains/{id}/purge:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    delete:
+      tags: [domains]
+      operationId: purgeDomain
+      summary: Permanently delete a watched domain
+      description: |
+        Unlike DELETE /domains/{id}, this is irreversible — and unlike that
+        route, this one requires the domain to already be soft-deleted:
+        calling this on a live domain 409s
+        (domain-not-deleted) rather than deleting it in one step. Purge is
+        only ever the second step of a two-step remove
+        (DELETE /domains/{id} first, then this). Also fails with 409
+        (domain-still-referenced) if matches or variant sets still
+        reference the domain — remove those first. See the Conflict
+        response for both `type` values.
+      responses:
+        "204": { description: No Content }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/domains/{id}/policies:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [domains]
+      operationId: getDomainIssuerPolicy
+      summary: Get issuer policy
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuerPolicy" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [domains]
+      operationId: replaceDomainIssuerPolicy
+      summary: Replace issuer policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IssuerPolicyWrite" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuerPolicy" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/settings/variants:
+    get:
+      tags: [settings]
+      operationId: getVariantSettings
+      summary: Get variant-generation defaults
+      description: |
+        config.yaml's old `variants:` section — dnstwist generator URL and
+        TLD/dictionary/max-per-domain defaults — now Postgres-owned. A PUT
+        here reconfigures the running dnstwist client immediately, no
+        restart required. See DESIGN §13.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VariantSettings" }
+    put:
+      tags: [settings]
+      operationId: replaceVariantSettings
+      summary: Replace variant-generation defaults
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VariantSettingsWrite" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VariantSettings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/settings/scoring:
+    get:
+      tags: [settings]
+      operationId: getScoringSettings
+      summary: Get severity thresholds
+      description: |
+        config.yaml's old `scoring.thresholds`, now Postgres-owned. A PUT
+        here takes effect on the very next variant match — see
+        internal/pipeline.Pipeline.classify. Weights
+        (score.DefaultWeights/DefaultExactWeights) are not part of this and
+        remain build defaults — see GET /docs/scoring.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringSettings" }
+    put:
+      tags: [settings]
+      operationId: replaceScoringSettings
+      summary: Replace severity thresholds
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScoringSettingsWrite" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringSettings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/domains/{id}/caa:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+      - name: disallow_wildcard
+        in: query
+        description: |
+          When true, adds an `issuewild ";"` record so no CA may issue a
+          wildcard certificate for this domain, regardless of the issue
+          records. Omitted (the default) leaves wildcard issuance governed
+          by the same CAs as non-wildcard issuance, per RFC 8659's fallback
+          from issuewild to issue.
+        schema: { type: boolean, default: false }
+      - name: iodef
+        in: query
+        description: |
+          Adds an `iodef` record: a CA that must refuse an issuance request
+          can report the attempt here. Must be a `mailto:` address or an
+          `https://` URL.
+        schema: { type: string }
+      - name: cas
+        in: query
+        description: |
+          Comma-separated CA identifiers (matched the same case-insensitive,
+          substring way as expected_issuers, e.g. `Let's Encrypt,DigiCert`)
+          to generate records for instead of the domain's expected_issuers.
+          Does not modify the stored policy — a generation input for this
+          request only, e.g. for previewing a CA set in the UI before
+          deciding whether to persist it to config.yaml.
+        schema: { type: string }
+      - name: exclude_cas
+        in: query
+        description: |
+          Comma-separated CA identifiers to drop from whichever list is in
+          effect (expected_issuers, or `cas` if given) before generating
+          records. The fast path for pulling a CA that turns out to be
+          unauthorized — a compromised reseller account, a mis-issuing
+          intermediate — out of the CAA policy immediately, without waiting
+          on a config.yaml deploy to remove it from expected_issuers. An
+          entry that doesn't match a known CA is reported in `warnings`
+          rather than silently ignored.
+        schema: { type: string }
+    get:
+      tags: [domains]
+      operationId: getDomainCAA
+      summary: Generate CAA records from the domain's issuer policy
+      description: |
+        Maps the domain's expected_issuers (internal/policy's own input,
+        DESIGN G-04) onto the CAA `issue` hostnames those CAs publish, the
+        same way sslmate.com/caa lets an operator build a CAA record set —
+        except the CA list here is the one already governing this domain's
+        alerting, not a hand-picked checklist. See internal/caa.
+
+        `cas` overrides expected_issuers outright and `exclude_cas` drops
+        specific CAs from whichever list is in effect; see their param
+        descriptions above. Neither persists — both are generation inputs
+        for this request only.
+
+        An expected_issuers (or `cas`) entry that doesn't resolve to a known
+        CA is never silently dropped: it's returned in `unmapped_issuers` and
+        explained in `warnings`. If every entry is unmapped, or every matched
+        CA is excluded via `exclude_cas`, `records` and `zone` come back
+        empty rather than a record set containing only `issuewild`/`iodef` —
+        publishing CAA records with no `issue` tag at all authorizes no CA to
+        issue (RFC 8659 §5.3), which would lock out the CA actually serving
+        the domain.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CAAResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/domains/{id}/dns-provider:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [domains]
+      operationId: getDomainDNSProvider
+      summary: Detect the domain's DNS host from its nameservers
+      description: |
+        A live NS lookup against the domain, matched against a curated table
+        of major public DNS hosts (internal/dnsprovider) — the answer to
+        "where do I paste the records GET .../caa just generated". Each
+        matched provider carries only its own DNS management console's entry
+        point, never a deep link into a specific account or zone: Merkleye
+        holds no credential that would let it know which one is the
+        operator's, so every link still requires login.
+
+        A lookup failure is reported via `warnings` with empty
+        `nameservers`/`providers` rather than an error status — the caller
+        always gets a renderable response.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DNSProviderResult" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/cas:
+    get:
+      tags: [domains]
+      operationId: listKnownCAs
+      summary: List the known CA catalog CAA generation resolves against
+      description: |
+        The fixed, global list of publicly-trusted CAs internal/caa.KnownCAs
+        recognizes — what `expected_issuers`, and GET /domains/{id}/caa's own
+        `cas`/`exclude_cas` params, resolve identifiers against to produce an
+        `issue` hostname. Not domain-scoped and nothing here is per-domain
+        state: the same catalog answers this for every domain, which is why
+        a client can use it to build a reusable CA picker instead of
+        free-typing names that may or may not match — see the unmapped-issuer
+        note on GET /domains/{id}/caa for what happens when they don't.
+
+        Each CA's identifier aliases (e.g. "GeoTrust" also resolving to
+        DigiCert) are deliberately not exposed here — they exist only so
+        free-text `expected_issuers` entries match, not as additional
+        selectable identities. Use `name` as the value to send back in `cas`/
+        `exclude_cas`.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KnownCAsResult" }
+
+  /api/v1/domains/{id}/variants:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+      - { name: cursor, in: query, schema: { type: string } }
+      - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+      - { name: algorithm, in: query, schema: { type: string } }
+      - { name: tld, in: query, schema: { type: string } }
+      - name: registration
+        in: query
+        description: RDAP's verdict. `unknown` means no RDAP answer is available for the name, which is not the same as unregistered.
+        schema: { type: string, enum: [registered, unregistered, unknown] }
+      - name: registered
+        in: query
+        description: Boolean shorthand for `registration` — true selects `registered`, false selects `unregistered`. `registration` wins if both are given.
+        schema: { type: boolean }
+      - name: page
+        in: query
+        description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
+        schema: { type: integer, minimum: 1, maximum: 2147483647 }
+    get:
+      tags: [variants]
+      operationId: listDomainVariants
+      summary: List generated lookalikes
+      description: |
+        Reads the domain's current (active) VariantSet from Postgres,
+        optionally filtered by algorithm, tld, and/or registration state.
+        Registration and DNS state are refreshed on a schedule by the variant
+        scanner rather than frozen at generation time — see `last_checked_at`
+        on each variant, which is null for one nothing has scanned yet. A
+        domain with no generation run yet, or one still in flight, renders as
+        an empty list rather than an error.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  variants:
+                    type: array
+                    items: { $ref: "#/components/schemas/Variant" }
+                  next_cursor: { type: [string, "null"] }
+                  next:
+                    type: [string, "null"]
+                    description: |
+                      The full request path + query string for the next page —
+                      this request's own filters, plus `cursor`. Null when
+                      there is no next page.
+                  total:
+                    type: integer
+                    description: Row count matching the current filters, independent of cursor/limit/page.
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/variants/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [variants]
+      operationId: getVariant
+      summary: Variant detail
+      description: |
+        The target of every variant's `_self` link. A variant's own database
+        ID is enough to look it up — it isn't scoped through a watched
+        domain, mirroring GET /matches/{id}.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Variant" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/domains/{id}/variant-changes:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+      - { name: cursor, in: query, schema: { type: string } }
+      - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+    get:
+      tags: [variants]
+      operationId: listDomainVariantChanges
+      summary: Variant state timeline
+      description: |
+        Every observed transition in the active set's variants, newest first:
+        a lookalike becoming registered, acquiring nameservers, standing up
+        MX records, or going dark again. Append-only and written only when
+        something actually moved, so this is a timeline of changes rather
+        than a scan log — a quiet sweep over a large set adds nothing here.
+
+        Paginated backwards through ids (`cursor` is the oldest id already
+        seen), since the interesting end of a timeline is the recent one.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  variant_changes:
+                    type: array
+                    items: { $ref: "#/components/schemas/VariantChange" }
+                  next_cursor: { type: [string, "null"] }
+                  next:
+                    type: [string, "null"]
+                    description: The full request path + query string for the next page. Null when there is no next page.
+                  total:
+                    type: integer
+                    description: Total transitions recorded for this domain's active set.
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/domains/{id}/variants/regenerate:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+      - name: algorithms
+        in: query
+        description: |
+          Comma-separated dnstwist fuzzers to run instead of the full default
+          set, e.g. `homoglyph,cyrillic,tld-swap`. Each value must be one of
+          the algorithms dnstwist supports; an unrecognized name is a 400,
+          not a silently-empty result.
+        schema: { type: string }
+      - name: tlds
+        in: query
+        description: |
+          Comma-separated TLDs to permute against instead of
+          variants.default_tlds, e.g. `com,net,io`.
+        schema: { type: string }
+      - name: dictionary
+        in: query
+        description: |
+          Comma-separated dictionary words fed to the `dictionary` fuzzer
+          instead of variants.default_dictionary, e.g. `login,secure,verify`.
+        schema: { type: string }
+      - name: max_variants
+        in: query
+        description: |
+          Overrides variants.max_per_domain for this run — the cap after
+          which the sidecar reports the result as truncated.
+        schema: { type: integer, minimum: 1 }
+    post:
+      tags: [variants]
+      operationId: regenerateDomainVariants
+      summary: Trigger a fresh generation run
+      description: |
+        A VariantSet is Postgres-owned operational state, same as domains,
+        policies and the allowlist (DESIGN §13) — this has been a real write
+        route from the start. Starts a new run
+        immediately and returns without waiting for it — watch
+        GET .../variants for the result. The new set becomes active,
+        deactivating the prior one, only once the run completes; a run
+        already in flight is shared rather than duplicated, and any
+        algorithms/tlds/dictionary/max_variants overrides on this call are
+        ignored in that case since the in-flight run already committed to
+        the parameters that started it.
+
+        algorithms/tlds/dictionary/max_variants each override the
+        corresponding variants.* config default for this run only — omitting
+        one falls back to config, it does not mean "use an empty list".
+      responses:
+        "202": { description: Generation started }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/NotImplementedYet" }
+
+  /api/v1/domains/{id}/backfill:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [domains]
+      operationId: queueDomainBackfill
+      summary: Re-queue a domain's SSLMate historical walk
+      description: |
+        Re-triggers the one-time bounded backfill (DESIGN G-02) main.go
+        already queues for every configured domain at boot. Useful to
+        re-pull a domain's history on demand — e.g. after a config
+        change — without restarting the process. Not incremental: there
+        is no persisted cursor between runs, so this repeats the full
+        history query for the domain against SSLMate's issuances API.
+        Returns immediately; matching observations flow through the
+        normal ingestion pipeline as the walk progresses.
+      responses:
+        "202": { description: Backfill queued }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/NotImplementedYet" }
+
+  /api/v1/backfill:
+    get:
+      tags: [domains, ops]
+      operationId: getBackfillStatus
+      summary: SSLMate backfill status and rate-limit state, across every watched domain
+      description: |
+        SSLMate's rate limit is otherwise invisible to an operator: a
+        rate-limited domain's only trace is a transient `last_error` on
+        `GET /plugins/sslmate-backfill`, overwritten the moment any other
+        domain's walk fails or succeeds next. This is the "am I currently
+        being rate limited, which domains, and when do they retry" answer,
+        in one request.
+
+        `status: deferred` is a domain currently rate-limited (or otherwise
+        deferred after a transient failure) — `backfill_resume_at` is when
+        `internal/backfillsched` will retry it. A domain with no history yet
+        renders as `status: pending` with both timestamps null, whether or
+        not a walk has ever actually been attempted for it.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackfillStatus" }
+
+  /api/v1/domains/{id}/variant-sets:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [variants]
+      operationId: listDomainVariantSets
+      summary: Variant set history
+      description: |
+        Every VariantSet ever generated for this domain, newest first. Sets
+        are versioned and never deleted, only deactivated — so a match
+        recorded months ago still resolves to the exact generator and config
+        that produced its variant. See DESIGN G-10.
+
+        Unpaginated: next_cursor and next are always null, the same as
+        GET /allowlist and GET /plugins — one domain's regeneration history
+        is small and code-bounded, not an unbounded operational log like
+        matches or certificates (see DESIGN "Every resource carries
+        _self...").
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  variant_sets:
+                    type: array
+                    items: { $ref: "#/components/schemas/VariantSet" }
+                  next_cursor: { type: "null" }
+                  next: { type: "null" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/variant-sets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [variants]
+      operationId: getVariantSet
+      summary: Variant set detail
+      description: |
+        The target of every variant set's `_self` link. A variant set's own
+        database ID is enough to look it up — it isn't scoped through a
+        watched domain, mirroring GET /variants/{id} and GET /matches/{id}.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VariantSet" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/variant-sets/{id}/variants:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+      - { name: cursor, in: query, schema: { type: string } }
+      - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+      - { name: algorithm, in: query, schema: { type: string } }
+      - { name: tld, in: query, schema: { type: string } }
+      - name: registration
+        in: query
+        description: RDAP's verdict. `unknown` means no RDAP answer is available for the name, which is not the same as unregistered.
+        schema: { type: string, enum: [registered, unregistered, unknown] }
+      - name: registered
+        in: query
+        description: Boolean shorthand for `registration` — true selects `registered`, false selects `unregistered`. `registration` wins if both are given.
+        schema: { type: boolean }
+      - name: page
+        in: query
+        description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
+        schema: { type: integer, minimum: 1, maximum: 2147483647 }
+    get:
+      tags: [variants]
+      operationId: listVariantSetVariants
+      summary: List variants belonging to one specific VariantSet
+      description: |
+        Same shape as GET /domains/{id}/variants, but scoped to one exact
+        set rather than "whichever set is currently active" — the only way
+        to inspect a deactivated set's variants, e.g. to compare what a
+        generation run produced last month against what it produces today.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  variants: { type: array, items: { $ref: "#/components/schemas/Variant" } }
+                  next_cursor: { type: [string, "null"] }
+                  next: { type: [string, "null"] }
+                  total:
+                    type: integer
+                    description: Row count matching the current filters, independent of cursor/limit/page.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/domains/{id}/matches:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+      - name: cursor
+        in: query
+        description: The `id` of the last item on the previous page (from `next_cursor`).
+        schema: { type: integer }
+      - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+      - name: page
+        in: query
+        description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
+        schema: { type: integer, minimum: 1, maximum: 2147483647 }
+      - name: order
+        in: query
+        description: Sort direction on `id` (insertion order). Defaults to newest first.
+        schema: { type: string, enum: [desc, asc], default: desc }
+      - name: merge_tbs_sha256
+        in: query
+        description: |
+          Collapse a precertificate/final-certificate pair — same
+          `certificate.tbs_sha256`, same watched domain, same matched name —
+          down to the first one in the current page's sort order. Off by
+          default, so both sibling rows are visible. Applied after `total`
+          and pagination are computed from the unmerged rows, so a merged
+          page can come back with fewer than `limit` entries — nothing is
+          skipped or repeated on the next page.
+        schema: { type: boolean, default: false }
+      - name: match_type
+        in: query
+        schema: { type: string, enum: [exact, variant] }
+      - name: severity
+        in: query
+        description: One or more of suppressed, info, medium, high, critical — comma-separated.
+        schema: { type: string }
+      - { name: issuer_expected, in: query, schema: { type: boolean } }
+      - { name: acknowledged, in: query, schema: { type: boolean } }
+      - name: matched_name
+        in: query
+        description: Substring match (case-insensitive) against the observed SAN.
+        schema: { type: string }
+      - name: acknowledged_by
+        in: query
+        description: Substring match (case-insensitive).
+        schema: { type: string }
+      - { name: risk_score_min, in: query, schema: { type: integer } }
+      - { name: risk_score_max, in: query, schema: { type: integer } }
+      - name: created_after
+        in: query
+        description: Inclusive lower bound on `created_at`, RFC 3339.
+        schema: { type: string, format: date-time }
+      - name: created_before
+        in: query
+        description: Inclusive upper bound on `created_at`, RFC 3339.
+        schema: { type: string, format: date-time }
+      - name: issuer_org
+        in: query
+        description: Substring match (case-insensitive) against the certificate's issuer organization.
+        schema: { type: string }
+      - name: issuer_dn
+        in: query
+        description: Substring match (case-insensitive) against the certificate's issuer DN.
+        schema: { type: string }
+      - name: subject_dn
+        in: query
+        description: Substring match (case-insensitive) against the certificate's subject DN.
+        schema: { type: string }
+      - name: serial_hex
+        in: query
+        description: Substring match (case-insensitive) against the certificate's serial number.
+        schema: { type: string }
+      - name: sha256
+        in: query
+        description: Exact match, 64 lowercase hex characters.
+        schema: { type: string }
+      - name: dns_name
+        in: query
+        description: Exact match against one of the certificate's SANs.
+        schema: { type: string }
+      - { name: is_precert, in: query, schema: { type: boolean } }
+      - name: issued_after
+        in: query
+        description: Inclusive lower bound on the certificate's `not_before`, RFC 3339.
+        schema: { type: string, format: date-time }
+      - name: issued_before
+        in: query
+        description: Inclusive upper bound on the certificate's `not_before`, RFC 3339.
+        schema: { type: string, format: date-time }
+      - name: expires_after
+        in: query
+        description: Inclusive lower bound on the certificate's `not_after`, RFC 3339.
+        schema: { type: string, format: date-time }
+      - name: expires_before
+        in: query
+        description: Inclusive upper bound on the certificate's `not_after`, RFC 3339.
+        schema: { type: string, format: date-time }
+      - name: max_validity_days
+        in: query
+        description: |
+          Restrict to matches whose certificate's lifetime (`not_after` -
+          `not_before`) exceeds this many days — a policy-violation filter
+          independent of any one domain's configured
+          `expected_issuers`/`max_validity_days`. Must be a positive integer.
+        schema: { type: integer, minimum: 1 }
+    get:
+      tags: [domains, findings]
+      operationId: listDomainMatches
+      summary: List matches recorded against one watched domain
+      description: |
+        `cursor` is the `id` of the last item on the previous page — the
+        response's `next_cursor` is meant to be passed straight back in, not
+        constructed by the caller. id, not created_at: several matches can
+        share a created_at down to the second, which would let a timestamp
+        cursor skip or repeat rows. `order` and any filters used to fetch
+        page 1 must be resent on later pages: the cursor alone does not carry
+        them — except through `next`, which is the same request re-encoded
+        with `cursor` set to the new value, so a client can just fetch it
+        directly instead of reconstructing its own filters. All filters
+        combine with AND.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matches:
+                    type: array
+                    items: { $ref: "#/components/schemas/Match" }
+                  next_cursor: { type: [string, "null"] }
+                  next:
+                    type: [string, "null"]
+                    description: |
+                      The full request path + query string for the next page —
+                      this request's own filters and order, plus `cursor`.
+                      Null when there is no next page.
+                  total:
+                    type: integer
+                    description: |
+                      Row count matching the current filters, independent of
+                      cursor/limit/page and of merge_tbs_sha256 — this always
+                      counts raw match rows, even when the page above was
+                      merged for display. Because of that, a pager computed
+                      as `ceil(total / limit)` can look like it's missing
+                      rows once a page is merged: use total_merged instead
+                      when merge_tbs_sha256=true.
+                  total_merged:
+                    type: integer
+                    description: |
+                      Present only when merge_tbs_sha256=true: the row count
+                      after collapsing precert/final pairs the same way the
+                      `matches` array above was collapsed — computed across
+                      every matching row, not just this page, so
+                      `ceil(total_merged / limit)` is safe to use as the
+                      merged page count the way `total` is for an unmerged
+                      one.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/domains/{id}/matches/rescore:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [domains, findings]
+      operationId: rescoreDomainMatches
+      summary: Backfill risk_score/risk_components for one domain's exact matches
+      description: |
+        Recomputes `risk_score`/`risk_components` for every exact match on
+        this watched domain, from each match's own already-stored
+        classification (severity, issuer_expected, certificate issuer) —
+        never by re-evaluating current policy, so it can't reclassify a match
+        against `expected_issuers`/`max_validity_days` values that changed
+        since it was recorded. Variant matches are untouched: they are always
+        scored inline at ingestion time. Idempotent — safe to call repeatedly.
+        See `/docs/scoring` and `merkleyed rescore` (the whole-database CLI
+        equivalent).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rescored: { type: integer, description: "Exact matches processed on this domain." }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/matches:
+    get:
+      tags: [findings]
+      operationId: listMatches
+      summary: List matches across every watched domain
+      description: |
+        ListMatchesByDomain without the domain-id scoping — see
+        GET /domains/{id}/matches for the same operation scoped to one
+        domain, and its `_self`/cursor conventions, which this shares. `domain`
+        narrows to one watched domain by name (as opposed to the scoped
+        route's path-based id), for a caller that already knows which domain
+        it wants without a second lookup for the domain's numeric id.
+      parameters:
+        - name: domain
+          in: query
+          description: Exact match against a watched domain's name.
+          schema: { type: string }
+        - name: cursor
+          in: query
+          description: The `id` of the last item on the previous page (from `next_cursor`).
+          schema: { type: integer }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+        - name: page
+          in: query
+          description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
+          schema: { type: integer, minimum: 1, maximum: 2147483647 }
+        - name: order
+          in: query
+          description: Sort direction on `id` (insertion order). Defaults to newest first.
+          schema: { type: string, enum: [desc, asc], default: desc }
+        - name: merge_tbs_sha256
+          in: query
+          description: |
+            Collapse a precertificate/final-certificate pair — same
+            `certificate.tbs_sha256`, same watched domain, same matched name —
+            down to the first one in the current page's sort order. Off by
+            default, so both sibling rows are visible. Applied after `total`
+            and pagination are computed from the unmerged rows, so a merged
+            page can come back with fewer than `limit` entries — nothing is
+            skipped or repeated on the next page.
+          schema: { type: boolean, default: false }
+        - name: match_type
+          in: query
+          schema: { type: string, enum: [exact, variant] }
+        - name: severity
+          in: query
+          description: One or more of suppressed, info, medium, high, critical — comma-separated.
+          schema: { type: string }
+        - { name: issuer_expected, in: query, schema: { type: boolean } }
+        - { name: acknowledged, in: query, schema: { type: boolean } }
+        - name: matched_name
+          in: query
+          description: Substring match (case-insensitive) against the observed SAN.
+          schema: { type: string }
+        - name: acknowledged_by
+          in: query
+          description: Substring match (case-insensitive).
+          schema: { type: string }
+        - { name: risk_score_min, in: query, schema: { type: integer } }
+        - { name: risk_score_max, in: query, schema: { type: integer } }
+        - name: created_after
+          in: query
+          description: Inclusive lower bound on `created_at`, RFC 3339.
+          schema: { type: string, format: date-time }
+        - name: created_before
+          in: query
+          description: Inclusive upper bound on `created_at`, RFC 3339.
+          schema: { type: string, format: date-time }
+        - name: issuer_org
+          in: query
+          description: Substring match (case-insensitive) against the certificate's issuer organization.
+          schema: { type: string }
+        - name: issuer_dn
+          in: query
+          description: Substring match (case-insensitive) against the certificate's issuer DN.
+          schema: { type: string }
+        - name: subject_dn
+          in: query
+          description: Substring match (case-insensitive) against the certificate's subject DN.
+          schema: { type: string }
+        - name: serial_hex
+          in: query
+          description: Substring match (case-insensitive) against the certificate's serial number.
+          schema: { type: string }
+        - name: sha256
+          in: query
+          description: Exact match, 64 lowercase hex characters.
+          schema: { type: string }
+        - name: dns_name
+          in: query
+          description: Exact match against one of the certificate's SANs.
+          schema: { type: string }
+        - { name: is_precert, in: query, schema: { type: boolean } }
+        - name: issued_after
+          in: query
+          description: Inclusive lower bound on the certificate's `not_before`, RFC 3339.
+          schema: { type: string, format: date-time }
+        - name: issued_before
+          in: query
+          description: Inclusive upper bound on the certificate's `not_before`, RFC 3339.
+          schema: { type: string, format: date-time }
+        - name: expires_after
+          in: query
+          description: Inclusive lower bound on the certificate's `not_after`, RFC 3339.
+          schema: { type: string, format: date-time }
+        - name: expires_before
+          in: query
+          description: Inclusive upper bound on the certificate's `not_after`, RFC 3339.
+          schema: { type: string, format: date-time }
+        - name: max_validity_days
+          in: query
+          description: |
+            Restrict to matches whose certificate's lifetime (`not_after` -
+            `not_before`) exceeds this many days — a policy-violation filter
+            independent of any one domain's configured
+            `expected_issuers`/`max_validity_days`. Must be a positive
+            integer.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matches:
+                    type: array
+                    items: { $ref: "#/components/schemas/Match" }
+                  next_cursor: { type: [string, "null"] }
+                  next: { type: [string, "null"] }
+                  total:
+                    type: integer
+                    description: |
+                      Row count matching the current filters, independent of
+                      cursor/limit/page and of merge_tbs_sha256 — this always
+                      counts raw match rows, even when the page above was
+                      merged for display. Because of that, a pager computed
+                      as `ceil(total / limit)` can look like it's missing
+                      rows once a page is merged: use total_merged instead
+                      when merge_tbs_sha256=true.
+                  total_merged:
+                    type: integer
+                    description: |
+                      Present only when merge_tbs_sha256=true — see
+                      GET /domains/{id}/matches' total_merged.
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/matches/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [findings]
+      operationId: getMatch
+      summary: Match detail, with risk breakdown and enrichment
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Match" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/matches/{id}/rescore:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [findings]
+      operationId: rescoreMatch
+      summary: Backfill risk_score/risk_components for one match
+      description: |
+        Recomputes and returns this match with a refreshed `risk_score`/
+        `risk_components`, from its own already-stored classification — see
+        `POST /domains/{id}/matches/rescore` for the same operation scoped to
+        a whole domain. Only exact matches can be rescored this way: variant
+        matches' signals depend on enrichment data that isn't persisted, so
+        this 404s for a variant match id, the same as for one that doesn't
+        exist at all.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Match" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/matches/{id}/acknowledge:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [findings]
+      operationId: acknowledgeMatch
+      summary: Acknowledge a match
+      description: |
+        The human "seen this, it's handled" triage action — sets
+        acknowledged_at/acknowledged_by. Distinct from
+        POST /matches/{id}/allowlist, which prevents the same lookalike from
+        ever matching again; this just marks the one row reviewed. Applies
+        to exact and variant matches alike, unlike rescoring.
+      responses:
+        "204": { description: Acknowledged }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/matches/stream:
+    get:
+      tags: [findings]
+      operationId: streamMatches
+      summary: Live match feed (SSE)
+      description: |
+        Server-Sent Events: one `event: match` per newly-persisted match,
+        across every watched domain, as internal/pipeline classifies it —
+        the live counterpart to GET /matches. Each event's `data` line is a
+        full Match, the identical shape GET /matches/{id} returns, so a
+        client never has to reconcile two representations of the same
+        resource. Nothing is replayed on connect — only matches persisted
+        after this request opens are delivered, because there is no single
+        "current state" for a global match feed to replay.
+
+        A connection that falls behind (buffer exhausted between events)
+        simply misses events rather than blocking ingestion — reconnect and
+        resume from GET /matches with a cursor to fill any gap.
+
+        This is live: this describes real, running SSE delivery, not a
+        stub. 501s under one precondition — no live match feed is wired up
+        for this deployment (`internal/matchfeed`, published to by
+        `internal/pipeline` on every newly-persisted match) — the same way
+        POST .../variants/regenerate 501s when variant generation isn't
+        configured.
+      responses:
+        "200":
+          description: |
+            text/event-stream of Match events. Each message is
+            `event: match\ndata: <Match JSON>\n\n`.
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/Match" }
+        "501": { $ref: "#/components/responses/NotImplementedYet" }
+
+  /api/v1/allowlist:
+    get:
+      tags: [allowlist]
+      operationId: listAllowlist
+      summary: List allowlisted lookalikes
+      description: |
+        Unpaginated: the set is small and human-curated, same as GET
+        /plugins — next_cursor and next are always null rather than
+        omitted or growing real pagination a bounded list doesn't need (see
+        DESIGN "Every resource carries _self...").
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  allowlist:
+                    type: array
+                    items: { $ref: "#/components/schemas/AllowlistEntry" }
+                  next_cursor: { type: "null" }
+                  next: { type: "null" }
+    post:
+      tags: [allowlist]
+      operationId: createAllowlistEntry
+      summary: Add an allowlist entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AllowlistEntryCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AllowlistEntry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/allowlist/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [allowlist]
+      operationId: getAllowlistEntry
+      summary: Allowlist entry detail
+      description: The target of every AllowlistEntry's `_self` link.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AllowlistEntry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [allowlist]
+      operationId: deleteAllowlistEntry
+      summary: Remove an allowlist entry
+      description: Permanent — an allowlist entry carries no downstream history the way a domain does, so there's no soft-delete step here.
+      responses:
+        "204": { description: No Content }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/notification-channels:
+    get:
+      tags: [notifications]
+      operationId: listNotificationChannels
+      summary: List notification channels
+      description: |
+        Unpaginated: the set is small and operator-curated, same as GET
+        /allowlist. Every channel's `url` is redacted — see
+        NotificationChannel's own description for why.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notification_channels:
+                    type: array
+                    items: { $ref: "#/components/schemas/NotificationChannel" }
+                  next_cursor: { type: "null" }
+                  next: { type: "null" }
+    post:
+      tags: [notifications]
+      operationId: createNotificationChannel
+      summary: Create a notification channel
+      description: |
+        The channel's `url` carries its delivery secret (a Slack/Discord bot
+        token, SMTP credentials, or a webhook token query param — see
+        internal/notify/sender.go's scheme routing) and is encrypted at the
+        field level (internal/dbcrypt) before it reaches Postgres — never
+        returned by any read, including this response. See
+        docs/THREAT-MODEL.md's "Notification channels are egress". See github.com/nikoksr/notify
+
+        The channel is verified before it is stored: the server delivers a
+        real message through the supplied `url` and persists nothing unless
+        it arrives, so no channel exists here that has never worked. A
+        channel discovered broken during an incident is the failure this
+        prevents, and there is no override — an operator who cannot deliver
+        to a URL now could not deliver an alert to it either.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationChannelCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationChannel" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "501": { $ref: "#/components/responses/NotImplementedYet" }
+        "502": { $ref: "#/components/responses/NotificationChannelTestFailed" }
+        "503": { $ref: "#/components/responses/EncryptionKeyNotConfigured" }
+
+  /api/v1/notification-channels/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [notifications]
+      operationId: getNotificationChannel
+      summary: Notification channel detail
+      description: The target of every NotificationChannel's `_self` link.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationChannel" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [notifications]
+      operationId: updateNotificationChannel
+      summary: Update a notification channel
+      description: |
+        Every field optional — an absent field leaves it unchanged. Omitting
+        `url` leaves the encrypted secret untouched, so `min_severity` or
+        `enabled` can be retuned without re-supplying the webhook URL.
+
+        A patch that carries `url` is a credential write and is verified
+        exactly like a create: the server delivers a message through the new
+        URL first and applies nothing unless it arrives. A patch without one
+        changes body context only and sends nothing — re-testing a URL nobody
+        touched would just be noise in someone's alert channel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationChannelPatch" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationChannel" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "501": { $ref: "#/components/responses/NotImplementedYet" }
+        "502": { $ref: "#/components/responses/NotificationChannelTestFailed" }
+        "503": { $ref: "#/components/responses/EncryptionKeyNotConfigured" }
+    delete:
+      tags: [notifications]
+      operationId: deleteNotificationChannel
+      summary: Remove a notification channel
+      description: Permanent — a channel carries no downstream history the way a domain does, so there's no soft-delete step here.
+      responses:
+        "204": { description: No Content }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/settings/notifications:
+    get:
+      tags: [notifications]
+      operationId: getNotificationSettings
+      summary: Get alert-delivery settings
+      description: |
+        config.yaml's old `notifications.dedup_window/rate_limit/retry`, now
+        Postgres-owned. See DESIGN §13.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationSettings" }
+    put:
+      tags: [notifications]
+      operationId: replaceNotificationSettings
+      summary: Replace alert-delivery settings
+      description: Takes effect on the running notify.Engine immediately — no restart required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationSettingsWrite" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationSettings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/plugins:
+    get:
+      tags: [ops]
+      operationId: listPlugins
+      summary: Ingestion plugin status
+      description: |
+        Per-plugin lag and last success, plus the ingestion watchdog state and
+        watch-set sizes. This is what the UI status strip reads for operators
+        without Prometheus.
+
+        A plugin that fans out across multiple upstream logs (certspotter)
+        also carries a lightweight `logs` array here — identity and last
+        checkpoint only. Full per-log detail (backlog, error history) is
+        deliberately kept off this endpoint so a dashboard poll doesn't pay
+        for every log's history on every plugin, every refresh; fetch
+        GET /plugins/{id} for that.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginStatus" }
+
+  /api/v1/plugins/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+        description: Plugin name, e.g. `certspotter`.
+        example: certstream
+    get:
+      tags: [ops]
+      operationId: getPlugin
+      summary: Detailed plugin status, including full per-log checkpoint data
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/plugins/{id}/logs/{logId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+        description: Plugin name, e.g. `certspotter`.
+      - name: logId
+        in: path
+        required: true
+        schema: { type: string }
+        description: A log's `log_id`, as returned in `plugins[].logs[]` or `PluginDetail.logs[]`.
+    get:
+      tags: [ops]
+      operationId: getPluginLog
+      summary: One log's full checkpoint detail
+      description: |
+        The target of each log entry's `_self` link — the same object shape
+        as one item of `PluginDetail.logs[]`, fetched directly rather than by
+        re-reading the whole plugin. 404s if the plugin doesn't exist, has no
+        per-log concept, or never reported this log ID.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginLogDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/plugins/{id}/config:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+        description: Plugin name, e.g. `certstream`.
+        example: certstream
+    get:
+      tags: [ops]
+      operationId: getPluginConfig
+      summary: Admin-set DB override for a plugin's connection settings
+      description: |
+        Only certstream implements this today — the firehose escape hatch
+        (DESIGN §06/§18): pointing it at a self-hosted certstream-server-rust
+        sidecar vs. calidog.io's public feed, or flipping it on/off, without
+        a redeploy. `configured: false` means no admin has ever written an
+        override; the plugin is running exactly what config.yaml declared.
+        404s for a plugin that isn't registered, or that has no configurable
+        settings at all.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginConfig" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [ops]
+      operationId: replacePluginConfig
+      summary: Set a plugin's connection settings
+      description: |
+        Requires config.yaml to have opted this plugin into runtime
+        overrides first (`ingest.certstream.db_override: true`) — 409
+        otherwise, naming the key to set. Applies live immediately
+        (`applied_live: true`) unless the running process couldn't hot-apply
+        it, in which case the write still durably persists and takes effect
+        on the next restart. `auth_token` omitted leaves any already-stored
+        token untouched; an explicit empty string clears it. 409 if
+        `auth_token` is set but `MERKLEYE_ENCRYPTION_KEY` isn't configured
+        on this deployment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PluginConfigWrite" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginConfig" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/config:
+    get:
+      tags: [ops]
+      operationId: getConfig
+      summary: Effective configuration, secrets redacted
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object }
+
+  /api/v1/summary:
+    get:
+      tags: [ops]
+      operationId: getSummary
+      summary: Dashboard rollup
+      description: |
+        One request for everything above the fold on the dashboard.
+
+        Without this the UI has to fetch every match and count client-side,
+        which is unbounded transfer that gets worse exactly as a deployment
+        gets busier — which is when the dashboard matters most.
+
+        Ingestion health is included rather than left to /plugins because an
+        empty findings list means one of two opposite things (nothing happened,
+        or ingestion is dead) and the dashboard must never present them alike.
+      parameters:
+        - name: window
+          in: query
+          schema: { type: string, default: "24h" }
+          description: Go duration string bounding the windowed counts.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Summary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/search:
+    get:
+      tags: [domains, variants, findings]
+      operationId: search
+      summary: Search domains, matches and variants in one request
+      description: |
+        Answers "have I seen this anywhere" without the caller already
+        knowing which watched domain to ask — the three places an analyst
+        pastes a suspicious name, an issuer string, or a certificate
+        fingerprint:
+
+        - `domains`: substring match against watched domain names
+          (config.yaml-sourced, same as `GET /domains`).
+        - `matches`: substring match against `matched_name`, or against the
+          certificate's `issuer_org`/`issuer_dn`/`subject_dn`/`serial_hex`;
+          a well-formed 64-character hex `q` is additionally matched against
+          the certificate's `sha256` exactly. Unscoped across every watched
+          domain, unlike `GET /domains/{id}/matches`.
+        - `variants`: substring match against `fqdn`, across every watched
+          domain's currently active variant set.
+
+        `limit` applies per category, not to the response as a whole: a
+        caller asking for 10 gets up to 10 of each, not 10 split three ways.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Search term. Matched case-insensitively as a substring in every category.
+          schema: { type: string, minLength: 1 }
+        - name: limit
+          in: query
+          description: Maximum results per category.
+          schema: { type: integer, default: 10, maximum: 50 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/matches/acknowledge:
+    post:
+      tags: [findings]
+      operationId: acknowledgeMatches
+      summary: Acknowledge several matches at once
+      description: |
+        A renewal wave or a noisy variant set produces dozens of low-severity
+        matches together. Acknowledging them one at a time is dozens of round
+        trips and dozens of audit rows for what was one human decision.
+
+        Partial success is reported rather than rolled back: one stale id in a
+        batch of fifty must not discard the other forty-nine.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: integer, format: int64 }
+                  minItems: 1
+                  maxItems: 500
+                note: { type: string }
+      responses:
+        "200":
+          description: Outcome per id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  acknowledged: { type: integer }
+                  failed:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer, format: int64 }
+                        reason: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/matches/{id}/allowlist:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [findings]
+      operationId: allowlistMatch
+      summary: Mark a match as not a threat
+      description: |
+        The "not a threat" action — the most-used control in the triage
+        screen. For a variant match, allowlists the matched variant's own
+        registrable domain (the eTLD+1 form future matches are actually
+        checked against, not the raw matched certificate SAN); for an exact
+        match, allowlists matched_name directly, which is informational only
+        since exact matches aren't allowlist-checked (DESIGN G-09).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: |
+                    Why this is benign. Unexplained allowlist entries are
+                    indistinguishable from mistakes six months later.
+      responses:
+        "204": { description: Allowlisted }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/certificates/{sha256}:
+    parameters:
+      - name: sha256
+        in: path
+        required: true
+        schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+        description: Lowercase hex SHA-256 of the DER — the deduplication key.
+    get:
+      tags: [findings]
+      operationId: getCertificate
+      summary: Certificate detail
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Certificate" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/certificates/{sha256}/pem:
+    parameters:
+      - name: sha256
+        in: path
+        required: true
+        schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+    get:
+      tags: [findings]
+      operationId: getCertificatePEM
+      summary: Certificate as PEM
+      description: |
+        Returns 404 rather than an empty body when certificate retention is
+        disabled — the DER is not stored by default, so there is nothing to
+        encode. See DESIGN §18, open decision 3.
+      responses:
+        "200":
+          description: PEM-encoded certificate
+          content:
+            application/x-pem-file:
+              schema: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/variants/preview:
+    post:
+      tags: [variants]
+      operationId: previewVariants
+      summary: Dry-run a variant generation
+      description: |
+        Returns the count a generation would produce without committing it, so
+        an operator can see that widening the TLD list turns 5,000 variants
+        into 90,000 before they do it. See DESIGN G-17. Runs a real dnstwist
+        generation synchronously but commits nothing: no VariantSet is
+        created. 501s under the same condition POST .../variants/regenerate
+        does — variant generation not configured (`generator_url` unset, see
+        PUT /api/v1/settings/variants).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VariantPreviewRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VariantPreviewResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "501": { $ref: "#/components/responses/NotImplementedYet" }
+        "502":
+          description: The dnstwist sidecar rejected or failed the preview request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/notifications/test:
+    post:
+      tags: [ops]
+      operationId: testNotificationChannel
+      summary: Fire a test notification through a channel
+      description: |
+        Verifying delivery before relying on it is the difference between a
+        working alert path and one that is discovered broken during an incident.
+        Delivers immediately through internal/notify.Engine.Send, bypassing
+        dedup, severity routing and rate limiting entirely — Dispatch's
+        throttling exists to protect against alert fatigue from real
+        findings, none of which applies to a single deliberate test send.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationTestRequest" }
+      responses:
+        "204": { description: Delivered }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/NotImplementedYet" }
+        "502":
+          description: The channel's own delivery attempt failed (e.g. Slack/Discord/SMTP rejected it or was unreachable).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/EncryptionKeyNotConfigured" }
+
+  /api/v1/audit:
+    get:
+      tags: [ops]
+      operationId: listAuditLog
+      summary: Audit log
+      description: |
+        Append-only. Actions are `{resource}.{crud_verb}` — domain.create,
+        domain.update, domain.delete, domain.restore, domain.purge,
+        policy.update, allowlist.create, allowlist.delete,
+        notification_channel.create, notification_channel.update,
+        notification_channel.delete, match.acknowledge, token.revoke.
+        Reads are deliberately not audited: /metrics covers access patterns,
+        and auditing every GET would drown the signal.
+
+        Every domain/policy/allowlist/notification-channel write route calls
+        the store's Audit write — see DESIGN §13 for why these are all
+        Postgres-owned and fully API-writable in the first place. A failed
+        audit-log write is logged, not surfaced to the caller: the mutation
+        it follows has already succeeded and persisted by the time it runs,
+        so failing the whole request over an observability gap would turn
+        that gap into a user-visible outage.
+      parameters:
+        - { name: actor,  in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: since,  in: query, schema: { type: string, format: date-time } }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Page"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  audit:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEntry" }
+                  next_cursor: { type: [string, "null"] }
+                  next: { type: [string, "null"] }
+                  total:
+                    type: integer
+                    description: Row count matching the current filters, independent of cursor/limit/page.
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/auth/config:
+    get:
+      tags: [auth]
+      operationId: getAuthConfig
+      summary: How to sign in
+      description: |
+        Public — no credentials. Lets the UI render the right sign-in screen
+        without hardcoding deployment facts, so one bundle serves every install.
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  oidc_enabled: { type: boolean }
+                  provider_name: { type: string }
+                  login_url:
+                    type: [string, "null"]
+                    description: |
+                      Navigate here to start sign-in. Never fetch it — it 302s
+                      to the identity provider, and fetch cannot hand the
+                      browser off to a third-party login page.
+                  bearer_enabled: { type: boolean }
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      operationId: getCurrentPrincipal
+      summary: The current principal
+      description: |
+        The UI's entire identity surface. Called once on load; a 401 means show
+        the sign-in screen. Scopes drive which controls render enabled — the
+        server enforces regardless, and the UI never treats its own check as
+        security.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Principal" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+
+components:
+  securitySchemes:
+    bearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Hashed (argon2id) opaque token. Scopes: read | write | admin.
+        Internal-only routes (/internal/v1/*) use a separate shared-secret
+        header and are excluded from this spec — they are loopback-only.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: merkleye_session
+      description: |
+        Browser session for humans, established by the Authentik redirect flow
+        and set server-side. Opaque and httpOnly, so JavaScript never reads it
+        and the UI never handles a token.
+
+        Deliberately NOT declared as `openIdConnect`. The backend is the OIDC
+        client — it performs the code exchange, validates the ID token and
+        issues this cookie. Declaring an openIdConnect scheme would instruct a
+        generated client to run the flow itself, which is an architecture that
+        does not exist here and which a code generator could scaffold in error.
+        The redirect endpoints are ordinary documented paths under /auth.
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: |
+        Opaque cursor from a previous response's next_cursor. Cursor rather
+        than offset because rows insert continuously — an offset skips records
+        whenever anything lands between two pages.
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 50, maximum: 500 }
+    Page:
+      name: page
+      in: query
+      description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
+      schema: { type: integer, minimum: 1, maximum: 2147483647 }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+      example: 1
+
+  responses:
+    BadRequest:
+      description: Invalid path or query parameter
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: |
+        No session cookie and no bearer token, or the credential presented is
+        invalid or expired. The UI treats this as "show the sign-in screen",
+        not as an error to report.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: |
+        The write conflicts with existing state. Returned as a Problem
+        (RFC 9457), not the plain Error every other 4xx here uses — a single
+        route can 409 for more than one distinct reason (e.g. purge: "not
+        soft-deleted yet" vs. "still has matches or variant sets"), so
+        `type` is what a client branches on, never `detail`'s prose. The
+        `type` values this API actually issues today:
+
+        - `https://merkleye.dev/problems/domain-name-conflict` —
+          POST /domains, POST /domains/{id}/restore: this name is already
+          in use by another live domain.
+        - `https://merkleye.dev/problems/domain-not-deleted` —
+          DELETE /domains/{id}/purge: the domain is still live. Purge is
+          only ever the second step of a two-step remove — soft-delete
+          (DELETE /domains/{id}) it first.
+        - `https://merkleye.dev/problems/domain-still-referenced` —
+          DELETE /domains/{id}/purge: the domain still has matches or
+          variant sets recorded against it. Remove those first, or use
+          DELETE /domains/{id} to soft-delete instead.
+        - `https://merkleye.dev/problems/allowlist-entry-conflict` —
+          POST /allowlist: this fqdn is already allowlisted.
+        - `https://merkleye.dev/problems/notification-channel-name-conflict`
+          — POST /notification-channels, PATCH /notification-channels/{id}:
+          this name is already in use by another channel.
+        - `https://merkleye.dev/problems/notification-channel-test-failed` —
+          POST /notification-channels, PATCH /notification-channels/{id}:
+          the verification message did not deliver through the supplied
+          `url`, so nothing was written. This one is a 502, not a 409 — see
+          that response's own description.
+        - `https://merkleye.dev/problems/plugin-db-override-disabled` —
+          PUT /plugins/{id}/config: this plugin hasn't opted into runtime DB
+          overrides (`ingest.<plugin>.db_override: true` in config.yaml).
+        - `https://merkleye.dev/problems/plugin-encryption-key-not-configured`
+          — PUT /plugins/{id}/config: `auth_token` was set but
+          `MERKLEYE_ENCRYPTION_KEY` isn't configured on this deployment.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotImplementedYet:
+      description: |
+        Not implemented yet. Deliberately 501 rather than 404: the route
+        exists and is correct, the backing feature just lands in a later
+        phase. See DESIGN §17.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    EncryptionKeyNotConfigured:
+      description: |
+        MERKLEYE_ENCRYPTION_KEY is not configured on this server, so a
+        notification channel's secret URL cannot be encrypted or decrypted
+        — see docs/OPERATIONS.md's key-management section.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotificationChannelTestFailed:
+      description: |
+        The verification message could not be delivered through the supplied
+        channel `url`, so nothing was written — the channel was not created,
+        or the patch was not applied. An RFC 9457 Problem with
+        `type: https://merkleye.dev/problems/notification-channel-test-failed`
+        so a client can tell this apart from any other upstream failure;
+        `detail` carries the transport error, which is what an operator needs
+        to fix the URL. Retry once the destination accepts the message.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    Problem:
+      type: object
+      description: |
+        RFC 9457 Problem Details. `type` is a stable machine-readable
+        identifier, so a client branches on it rather than sniffing for the
+        presence of bespoke fields. Retrofitting an error contract after
+        clients exist means supporting both shapes forever.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          examples: ["https://merkleye.dev/problems/unauthorized"]
+        title:  { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+
+    Principal:
+      type: object
+      description: The authenticated caller, however they authenticated.
+      properties:
+        subject:
+          type: string
+          description: IdP `sub` for humans, client_id for services, token name otherwise.
+        display: { type: string }
+        scopes:
+          type: array
+          items: { type: string, enum: [read, write, admin] }
+        issued_via:
+          type: string
+          enum: [bearer, oidc_user, oidc_service, break_glass]
+        expires_at: { type: [string, "null"], format: date-time }
+
+    Summary:
+      type: object
+      description: Everything the dashboard needs above the fold, in one request.
+      properties:
+        window: { type: string }
+        unacknowledged:
+          type: object
+          description: Open findings by severity — the triage backlog.
+          properties:
+            critical: { type: integer }
+            high:     { type: integer }
+            medium:   { type: integer }
+            info:     { type: integer }
+        matches_in_window:
+          type: object
+          properties:
+            exact:   { type: integer }
+            variant: { type: integer }
+        watch_set:
+          type: object
+          properties:
+            domains:     { type: integer }
+            variants:    { type: integer }
+            allowlisted: { type: integer }
+        ingestion:
+          type: object
+          description: |
+            Included here, not left to /plugins, because zero findings is good
+            news only if ingestion is alive. Presented alone the count is
+            ambiguous, and the ambiguity favours complacency.
+          properties:
+            ingestion_watchdog_tripped: { type: boolean }
+            last_observation_at:  { type: [string, "null"], format: date-time }
+            observations_total:   { type: integer, format: int64 }
+        generated_at: { type: string, format: date-time }
+
+    SearchResult:
+      type: object
+      description: |
+        The response to GET /api/v1/search. Each array holds up to `limit`
+        items for that category, independently of the other two — see the
+        route's own description for what a substring hit means per category.
+      properties:
+        query: { type: string }
+        domains:
+          type: array
+          items: { $ref: "#/components/schemas/Domain" }
+        matches:
+          type: array
+          items: { $ref: "#/components/schemas/Match" }
+        variants:
+          type: array
+          items: { $ref: "#/components/schemas/Variant" }
+
+    BackfillStatus:
+      type: object
+      description: The response to GET /api/v1/backfill.
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            Mirrors ingest.sslmate_backfill.enabled. False means every row
+            below is stale history from a previous run, not something
+            currently in progress.
+        queue_length:
+          type: integer
+          description: Domains already enqueued, waiting on the single backfill worker.
+        counts:
+          type: object
+          properties:
+            pending:  { type: integer }
+            done:     { type: integer }
+            deferred: { type: integer, description: Currently rate-limited or otherwise deferred. }
+        domains:
+          type: array
+          items:
+            type: object
+            properties:
+              domain: { type: string }
+              status: { type: string, enum: [pending, done, deferred] }
+              backfilled_at: { type: [string, "null"], format: date-time }
+              backfill_resume_at:
+                type: [string, "null"]
+                format: date-time
+                description: Set only when status is deferred.
+
+    AuditEntry:
+      type: object
+      description: |
+        Append-only. before/after are full row snapshots rather than a diff — a
+        diff is derivable from two snapshots, but a snapshot is not recoverable
+        from a diff that dropped a field. See DESIGN G-14.
+      properties:
+        id:          { type: integer, format: int64 }
+        actor:       { type: string }
+        action:
+          type: string
+          description: "{resource}.{crud_verb}, e.g. policy.update"
+          examples: ["domain.create", "match.acknowledge", "allowlist.create"]
+        entity_type: { type: string }
+        entity_id:   { type: [integer, "null"], format: int64 }
+        before:      { type: [object, "null"] }
+        after:       { type: [object, "null"] }
+        ip:          { type: string }
+        user_agent:  { type: string }
+        at:          { type: string, format: date-time }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        detail: { type: string }
+
+    Health:
+      type: object
+      properties:
+        status: { type: string }
+        ingestion_watchdog_tripped: { type: boolean }
+        checked_at: { type: string, format: date-time }
+
+    Severity:
+      type: string
+      enum: [suppressed, info, medium, high, critical]
+
+    Domain:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        domain:
+          type: string
+          description: A-label form, lowercased, no trailing dot.
+        include_subdomains: { type: boolean }
+        enabled:
+          type: boolean
+          description: A manual pause/resume toggle, independent of deletion — see PATCH /domains/{id}.
+        expected_issuers:
+          type: array
+          items: { type: string }
+          description: |
+            Case-insensitive substrings matched against the issuer DN and O.
+            Substring rather than exact so an intermediate rotation
+            (Let's Encrypt R3 → E1) does not read as an attack.
+        max_validity_days: { type: integer }
+        deleted_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            Set only on a domain fetched with GET /domains?status=deleted or
+            status=all — every other read path excludes soft-deleted domains
+            entirely, so this is always null/absent there.
+        _self: { type: string, description: "GET this for the domain's own detail — see GET /domains/{id}." }
+
+    DomainCreate:
+      type: object
+      required: [domain, expected_issuers]
+      properties:
+        domain:
+          type: string
+          description: |
+            A domain name, in either A-label or Unicode form — normalized to
+            A-label on save (the form the matcher requires), with the
+            original Unicode form kept for display if the two differ. Must
+            not start with `*.`.
+        include_subdomains:
+          type: boolean
+          default: true
+        expected_issuers:
+          type: array
+          items: { type: string }
+          minItems: 1
+          description: |
+            Required. Without at least one entry, every routine renewal
+            alerts as critical (DESIGN G-04) — find yours with:
+            `openssl s_client -connect <domain>:443 -servername <domain>
+            </dev/null 2>/dev/null | openssl x509 -noout -issuer`
+        max_validity_days:
+          type: integer
+          default: 0
+          description: |
+            0 (default) means unenforced. Otherwise, keep at or below the
+            CA/Browser Forum's current publicly-trusted TLS max validity
+            (Ballot SC-081) — a lower value flags fully compliant
+            certificates as policy violations. That ceiling steps down over
+            time: 398 days before 2026-03-15, 200 days 2026-03-15 through
+            2027-03-14 (current), 100 days 2027-03-15 through 2029-03-14, 47
+            days from 2029-03-15 onward.
+
+    DomainPatch:
+      type: object
+      description: A null/omitted field is left unchanged.
+      properties:
+        include_subdomains: { type: boolean }
+        enabled: { type: boolean }
+
+    IssuerPolicy:
+      type: object
+      description: |
+        expected_issuers/max_validity_days here are the exact same
+        underlying row(s) as Domain's own fields of the same name, not an
+        independent copy — a PUT here is immediately reflected in the
+        next GET /domains/{id}, and vice versa (DomainCreate seeds this
+        table too). A client never needs to reconcile "domain says X,
+        policy says Y" drift or re-fetch both after writing either one.
+      properties:
+        expected_issuers:
+          type: array
+          items: { type: string }
+        max_validity_days: { type: integer }
+        _self: { type: string }
+
+    IssuerPolicyWrite:
+      type: object
+      required: [expected_issuers]
+      description: Replaces the whole policy as a unit — same fields and same G-04 requirement as DomainCreate's.
+      properties:
+        expected_issuers:
+          type: array
+          items: { type: string }
+          minItems: 1
+        max_validity_days: { type: integer, default: 0 }
+
+    VariantSettings:
+      type: object
+      properties:
+        generator_url:
+          type: string
+          description: dnstwist sidecar base URL. Empty disables variant generation.
+        default_tlds:
+          type: array
+          items: { type: string }
+        default_dictionary:
+          type: array
+          items: { type: string }
+        max_per_domain: { type: integer }
+        scan_enabled:
+          type: boolean
+          description: |
+            Whether the variant scanner refreshes registration and DNS state
+            for active sets. Off by default: this is outbound traffic aimed
+            at attacker-controlled infrastructure and at third-party
+            registries, and some deployments want it proxied or off.
+        scan_interval_seconds:
+          type: integer
+          description: How often each variant in an active set gets its DNS probe.
+        scan_dns_qps:
+          type: number
+          description: Ceiling on outbound DNS queries per second across the sweep.
+        scan_rdap_qps:
+          type: number
+          description: |
+            Ceiling on outbound RDAP requests per second. Registries do not
+            publish their thresholds; 1-2/s is the commonly cited safe
+            practice, and a 429 response backs off further on its own.
+        scan_rdap_rotation_days:
+          type: integer
+          description: |
+            How often every variant is re-verified against RDAP, independent
+            of the re-checks a DNS change triggers. Measured in days because
+            a daily full-set RDAP sweep would exceed any registry's
+            tolerance.
+        scan_resolvers:
+          type: array
+          items: { type: string }
+          description: |
+            Resolvers the sweep queries. Empty means the host's own
+            (/etc/resolv.conf). Queries never go directly to authoritative or
+            root servers — enterprise networks routinely allow DNS only to
+            their own resolvers.
+        updated_at: { type: string, format: date-time, nullable: true }
+        _self: { type: string }
+
+    VariantSettingsWrite:
+      type: object
+      required: [default_tlds, max_per_domain]
+      description: Replaces the whole record as a unit — same PUT semantics as IssuerPolicyWrite.
+      properties:
+        generator_url: { type: string }
+        default_tlds:
+          type: array
+          items: { type: string }
+        default_dictionary:
+          type: array
+          items: { type: string }
+        max_per_domain: { type: integer, minimum: 1 }
+        scan_enabled: { type: boolean }
+        scan_interval_seconds: { type: integer, minimum: 0 }
+        scan_dns_qps: { type: number, minimum: 0 }
+        scan_rdap_qps: { type: number, minimum: 0 }
+        scan_rdap_rotation_days: { type: integer, minimum: 0 }
+        scan_resolvers:
+          type: array
+          items: { type: string }
+
+    ScoringSettings:
+      type: object
+      properties:
+        critical: { type: integer }
+        high: { type: integer }
+        medium: { type: integer }
+        updated_at: { type: string, format: date-time, nullable: true }
+        _self: { type: string }
+
+    ScoringSettingsWrite:
+      type: object
+      required: [critical, high, medium]
+      description: Must satisfy critical > high > medium > 0.
+      properties:
+        critical: { type: integer }
+        high: { type: integer }
+        medium: { type: integer }
+
+    CAARecord:
+      type: object
+      properties:
+        flag: { type: integer, description: "Always 0 (non-critical) — see internal/caa.Record." }
+        tag: { type: string, enum: [issue, issuewild, iodef] }
+        value: { type: string }
+
+    CAAResult:
+      type: object
+      properties:
+        domain:
+          type: string
+          description: Normalized (lowercased, no trailing dot) form of the watched domain.
+        watched_domain: { $ref: "#/components/schemas/Domain" }
+        records:
+          type: array
+          items: { $ref: "#/components/schemas/CAARecord" }
+          description: |
+            Empty when no expected_issuers entry resolved to a known CA —
+            see the unmapped-issuer note on GET /domains/{id}/caa.
+        zone:
+          type: string
+          description: |
+            `records` pre-rendered as zone-file lines (one `<domain>. CAA
+            <flag> <tag> "<value>"` per record), ready to paste into a DNS
+            provider's console or a zone file. Empty when records is.
+        unmapped_issuers:
+          type: array
+          items: { type: string }
+          description: expected_issuers entries that did not resolve to a known CA.
+        warnings:
+          type: array
+          items: { type: string }
+        _self: { type: string }
+
+    DNSProvider:
+      type: object
+      properties:
+        name: { type: string }
+        dashboard_url:
+          type: string
+          description: |
+            The provider's own DNS/domain management entry point. Never a
+            deep link into a specific account or zone — always requires
+            login.
+
+    DNSProviderResult:
+      type: object
+      properties:
+        domain: { type: string }
+        nameservers:
+          type: array
+          items: { type: string }
+        providers:
+          type: array
+          items: { $ref: "#/components/schemas/DNSProvider" }
+          description: |
+            Usually one entry. More than one means a split or migrating
+            delegation; empty means none of the queried nameservers matched
+            a known provider.
+        warnings:
+          type: array
+          items: { type: string }
+        _self: { type: string }
+
+    KnownCA:
+      type: object
+      properties:
+        name:
+          type: string
+          description: |
+            Canonical name to send back in `cas`/`exclude_cas` — matched the
+            same case-insensitive, substring way as `expected_issuers`.
+        issue_hostname:
+          type: string
+          description: The value this CA publishes for a CAA `issue`/`issuewild` record.
+        notes:
+          type: string
+          description: A caveat worth surfacing about this CA's identifier, when one exists.
+
+    KnownCAsResult:
+      type: object
+      properties:
+        cas:
+          type: array
+          items: { $ref: "#/components/schemas/KnownCA" }
+        _self: { type: string }
+
+    Variant:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        fqdn:
+          type: string
+          description: Registrable domain (eTLD+1), A-label form. The match key.
+        fqdn_unicode:
+          type: [string, "null"]
+          description: |
+            Display form. "xn--80ajb1au1a38g.com" tells a human nothing;
+            "ехамрӏе.com" shows the attack at a glance.
+        algorithm: { type: string }
+        tld: { type: string }
+        status:
+          type: string
+          enum: [active, parked, registered, unregistered]
+          description: |
+            The one-word reading, computed from `registration` and
+            `ns_resolves` rather than stored: `active` (owned and built on),
+            `parked` (bought, nothing standing on it), `registered`
+            (delegated over an RDAP negative — stale RDAP, a registry glitch,
+            or a name mid-drop), `unregistered` (nobody has it, and nothing
+            says otherwise). Delegation is the load-bearing signal in both
+            directions, which is why an unknown registration with nameservers
+            reads `active` while one without them reads `unregistered`.
+        registration:
+          type: string
+          enum: [registered, unregistered, unknown]
+          description: |
+            RDAP's verdict. `unknown` means no RDAP answer is available —
+            the TLD publishes no RDAP service, or nothing has checked yet —
+            and is never the same claim as `unregistered`.
+        ns_resolves:
+          type: boolean
+          description: |
+            The apex answered with NS records: somebody has published
+            nameservers for it. This is what gates the A/AAAA and MX
+            lookups — a name nobody has delegated has nothing to resolve.
+        resolves:
+          type: boolean
+          description: An A or AAAA record answered.
+        mx:
+          type: array
+          items: { type: string }
+          description: MX hostnames, empty when none. Sorted, so a set only differs when the set itself differs.
+        registered_at:
+          type: [string, "null"]
+          format: date-time
+          description: The registration date RDAP reports. Null for a TLD with no RDAP service, or one whose server publishes no registration event.
+        first_registered_at:
+          type: [string, "null"]
+          format: date-time
+          description: When Merkleye first observed it registered. Not the registry's date — and the only such date available for a TLD without RDAP.
+        registration_checked_at:
+          type: [string, "null"]
+          format: date-time
+          description: Last RDAP verdict. Null means RDAP has never answered for this name.
+        state_changed_at:
+          type: [string, "null"]
+          format: date-time
+          description: When any tracked field last changed.
+        last_checked_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            Last completed DNS probe. Null means never scanned, which is
+            distinct from scanned and found nothing — an unscanned variant
+            must not read as a confirmed negative.
+        next_check_at:
+          type: [string, "null"]
+          format: date-time
+          description: When this variant's DNS probe is next due.
+        watched_domain:
+          allOf: [{ $ref: "#/components/schemas/Domain" }]
+          description: |
+            The watched domain this variant belongs to, resolved through its
+            VariantSet — present on every variant, so GET /variants/{id} can
+            say "lookalike of example.com" without a separate fetch through
+            the variant set.
+        _self:
+          type: string
+          description: |
+            GET this for the variant's own detail — see GET /variants/{id}.
+
+    VariantChange:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        change:
+          type: string
+          enum:
+            [
+              became_registered,
+              became_unregistered,
+              registration_unknown,
+              gained_ns,
+              lost_ns,
+              began_resolving,
+              stopped_resolving,
+              gained_mx,
+              lost_mx,
+              mx_changed,
+            ]
+          description: What moved. One row per transition, never per scan.
+        observed_at: { type: string, format: date-time }
+        fqdn: { type: string, description: The lookalike this transition is about. }
+        variant: { type: string, description: Link to the variant's own detail. }
+        previous:
+          type: object
+          additionalProperties: true
+          description: The tracked fields as they were before the transition.
+        current:
+          type: object
+          additionalProperties: true
+          description: The tracked fields as they are after it.
+        alerted:
+          type: boolean
+          description: |
+            Whether this transition produced an alert. Only arrival at a
+            status meaning a delegated name someone owns, or MX records
+            appearing, wakes anybody; everything else is recorded and silent.
+        _self: { type: string }
+
+    VariantSet:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        generator: { type: string }
+        generator_version: { type: string }
+        config_hash: { type: string }
+        algorithms: { type: array, items: { type: string } }
+        tlds: { type: array, items: { type: string } }
+        dictionary: { type: array, items: { type: string } }
+        variant_count: { type: integer }
+        truncated: { type: boolean }
+        is_active: { type: boolean }
+        generated_at: { type: string, format: date-time }
+        watched_domain:
+          allOf: [{ $ref: "#/components/schemas/Domain" }]
+          description: |
+            The watched domain this set was generated for — a direct FK
+            (generation runs are always per-domain), present on every
+            variant set so GET /variant-sets/{id} can link straight back to
+            /domains/{id} instead of forcing an N+1 fetch.
+        _self:
+          type: string
+          description: GET this for the variant set's own detail — see GET /variant-sets/{id}.
+
+    VariantPreviewRequest:
+      type: object
+      required: [domain]
+      properties:
+        domain:
+          type: string
+          description: |
+            The domain to preview generation for. Not scoped to an existing
+            watched domain — an operator previews before deciding to watch a
+            domain at all, or before widening an existing one's TLD list.
+        algorithms:
+          type: array
+          items: { type: string }
+          description: Overrides variants.default_tlds' companion algorithm list for this preview only. Omitted, falls back to the full dnstwist fuzzer set.
+        tlds:
+          type: array
+          items: { type: string }
+          description: Overrides variants.default_tlds for this preview only. Omitted, falls back to the configured default.
+        dictionary:
+          type: array
+          items: { type: string }
+          description: Overrides variants.default_dictionary for this preview only. Omitted, falls back to the configured default.
+        max_variants:
+          type: integer
+          minimum: 1
+          description: Overrides variants.max_per_domain for this preview only. Omitted, falls back to the configured default.
+
+    VariantPreviewResult:
+      type: object
+      description: |
+        What a real generation run against these parameters would produce —
+        nothing is persisted: no VariantSet is created, no Job is started.
+        See POST /domains/{id}/variants/regenerate to commit to a run with
+        the same overrides.
+      properties:
+        domain: { type: string }
+        variant_count: { type: integer }
+        truncated: { type: boolean }
+        generator: { type: string }
+        generator_version: { type: string }
+        algorithms:
+          type: array
+          items: { type: string }
+          description: The algorithm list actually used, after resolving overrides against configured defaults.
+        tlds:
+          type: array
+          items: { type: string }
+          description: The TLD list actually used, after resolving overrides against configured defaults.
+        dictionary:
+          type: array
+          items: { type: string }
+          description: The dictionary actually used, after resolving overrides against configured defaults.
+        max_variants: { type: integer }
+
+    RiskComponent:
+      type: object
+      properties:
+        signal: { type: string }
+        delta: { type: integer }
+        reason: { type: string }
+
+    Match:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        match_type: { type: string, enum: [exact, variant] }
+        matched_name:
+          type: string
+          description: The observed SAN, not the watch entry.
+        severity: { $ref: "#/components/schemas/Severity" }
+        risk_score: { type: integer, minimum: 0, maximum: 100 }
+        risk_components:
+          type: array
+          items: { $ref: "#/components/schemas/RiskComponent" }
+          description: |
+            The full derivation of risk_score. Stored so the UI can show its
+            work and so weights can be retuned without losing the ability to
+            explain historical alerts.
+        issuer_expected: { type: [boolean, "null"] }
+        certificate: { $ref: "#/components/schemas/Certificate" }
+        watched_domain:
+          allOf: [{ $ref: "#/components/schemas/Domain" }]
+          description: |
+            The watched domain this match belongs to. Present on every match,
+            exact and variant alike — without it the triage table cannot say
+            "lookalike of example.com" without an N+1 fetch per row.
+        variant:
+          oneOf:
+            - $ref: "#/components/schemas/Variant"
+            - type: "null"
+          description: |
+            The generated lookalike that matched, or null for an exact match.
+            Carries the algorithm that produced it, which feeds both the risk
+            score and the analyst's read of how deliberate the lookalike is.
+        acknowledged_at: { type: [string, "null"], format: date-time }
+        acknowledged_by: { type: string }
+        created_at: { type: string, format: date-time }
+        _self: { type: string, description: "GET this for the match's own detail — see GET /matches/{id}." }
+
+    Certificate:
+      type: object
+      properties:
+        sha256:
+          type: string
+          description: |
+            Hex fingerprint, and the deduplication key. Deliberately not the
+            serial: a CA's serial is unique only within that CA, so two issuers
+            can collide and falsely merge unrelated certificates.
+        tbs_sha256:
+          type: [string, "null"]
+          description: |
+            Hex of the TBSCertificate hash. Identical for a precertificate and
+            its final certificate — only the poison/SCT-list extension differs
+            between them — so it pairs the two rows CT logging produces for
+            one issuance (see GET /matches's merge_tbs_sha256). Null when the
+            observation source never provided it.
+        discovered_by:
+          type: string
+          description: |
+            The ingest plugin that first observed this certificate — e.g.
+            certspotter, certstream, sslmate-backfill (see GET /plugins for
+            the full set currently configured). Set once, from whichever
+            plugin's sighting created this row; a later sighting of the same
+            certificate from a different plugin never changes it. Absent for
+            certificates persisted before this field existed.
+        serial_hex: { type: string }
+        issuer_dn: { type: string }
+        issuer_org: { type: string }
+        subject_dn: { type: string }
+        dns_names: { type: array, items: { type: string } }
+        not_before: { type: string, format: date-time }
+        not_after: { type: string, format: date-time }
+        is_precert: { type: boolean }
+        first_seen_at: { type: string, format: date-time }
+        pem_url:
+          type: string
+          description: "GET this for the certificate as PEM — see GET /certificates/{sha256}/pem. Constructed from sha256; not itself a guarantee the certificate is retained (retention off still 404s)."
+
+    AllowlistEntry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        fqdn: { type: string }
+        reason: { type: string }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        _self:
+          type: string
+          description: "GET this for the entry's own detail — see GET /allowlist/{id}."
+
+    AllowlistEntryCreate:
+      type: object
+      required: [fqdn]
+      properties:
+        fqdn:
+          type: string
+          description: The registrable domain (eTLD+1) to stop alerting on — see internal/match's Snapshot.allowlisted.
+        reason:
+          type: string
+          description: Why this is benign. Unexplained allowlist entries are indistinguishable from mistakes six months later.
+
+    NotificationChannel:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        url_redacted:
+          type: string
+          description: Always "***" — never the channel's actual URL. See docs/OPERATIONS.md's key-management section.
+        kind:
+          type: string
+          enum: [slack, discord, smtp, webhook, unknown]
+          description: |
+            A non-secret label derived from url's scheme when the channel
+            was created or its URL last changed (internal/notify.ChannelKind)
+            — never by decrypting the stored URL on read, which would turn a
+            lost/misconfigured MERKLEYE_ENCRYPTION_KEY into an outage for
+            listing channels at all, the same reason url_redacted is a fixed
+            placeholder rather than scheme-revealing. Lets a list/detail UI
+            label and icon a channel without ever seeing its secret.
+        min_severity: { type: string, enum: [info, medium, high, critical] }
+        template: { type: string }
+        mode:
+          type: string
+          enum: ["", digest]
+          description: Empty means immediate delivery.
+        digest_at:
+          type: string
+          description: "HH:MM, local, when mode=digest."
+        enabled: { type: boolean }
+        verified_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            When a message last actually delivered through this channel.
+            Never null for a channel written through this API: POST, and any
+            PATCH carrying a `url`, deliver a verification message first and
+            store nothing if it fails, so the timestamp is always at least as
+            recent as the secret it vouches for. POST
+            /api/v1/notifications/test refreshes it. Null marks a row that
+            predates the requirement or was written straight to the database
+            — an alert path nobody has proven.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        _self:
+          type: string
+          description: "GET this for the channel's own detail — see GET /notification-channels/{id}."
+
+    NotificationChannelCreate:
+      type: object
+      required: [name, url]
+      properties:
+        name: { type: string }
+        url:
+          type: string
+          description: |
+            Scheme-routed onto nikoksr/notify (internal/notify/sender.go):
+            slack://<bot-token>@<channel-id>, discord://<bot-token>@<channel-id>,
+            smtp://[<user>:<pass>@]<host>:<port>/?from=<addr>&to=<addr>[,<addr>...],
+            or generic+http(s)://<host>/<path>. Encrypted before it reaches
+            Postgres; never returned by any read.
+
+            Verified before it is stored: the server delivers a message
+            through this URL and creates the channel only if it arrives (502
+            otherwise, with nothing persisted). There is no way to opt out —
+            a URL that cannot deliver now could not deliver an alert either.
+        min_severity: { type: string, enum: [info, medium, high, critical], default: high }
+        template: { type: string }
+        mode: { type: string, enum: ["", digest] }
+        digest_at: { type: string }
+        enabled: { type: boolean, default: true }
+
+    NotificationChannelPatch:
+      type: object
+      description: |
+        Every field optional — an absent field leaves it unchanged. Omitting
+        `url` leaves the encrypted secret untouched, and is also what makes a
+        patch silent: only a patch that carries `url` is a credential write,
+        and only that one has to prove delivery first.
+      properties:
+        name: { type: string }
+        url:
+          type: string
+          description: |
+            A new credential, so it is verified exactly like a create: the
+            server delivers a message through it and applies the patch only
+            if it arrives (502 otherwise, with the channel left unchanged).
+            Every other field here changes body context only and sends
+            nothing.
+        min_severity: { type: string, enum: [info, medium, high, critical] }
+        template: { type: string }
+        mode: { type: string, enum: ["", digest] }
+        digest_at: { type: string }
+        enabled: { type: boolean }
+
+    NotificationTestRequest:
+      type: object
+      required: [channel_id]
+      properties:
+        channel_id:
+          type: integer
+          format: int64
+          description: |
+            Delivers through this channel's own decrypted URL regardless of
+            its `enabled` state, so an operator can verify a channel before
+            switching it on, not only after.
+        title:
+          type: string
+          description: Defaults to a canned message identifying Merkleye and the channel under test if omitted.
+        body:
+          type: string
+          description: Defaults to a canned message identifying Merkleye and the channel under test if omitted.
+
+    NotificationSettings:
+      type: object
+      properties:
+        dedup_window:
+          type: string
+          description: Go duration string, e.g. "24h". Collapses the 2-6 log sightings of a single issuance into one alert.
+        rate_limit_per_channel_per_minute: { type: integer }
+        rate_limit_burst: { type: integer }
+        retry_max_attempts: { type: integer }
+        updated_at: { type: string, format: date-time, nullable: true }
+        _self: { type: string }
+
+    NotificationSettingsWrite:
+      type: object
+      required: [dedup_window, rate_limit_per_channel_per_minute, rate_limit_burst, retry_max_attempts]
+      properties:
+        dedup_window: { type: string, description: 'Go duration string, e.g. "24h".' }
+        rate_limit_per_channel_per_minute: { type: integer, minimum: 1 }
+        rate_limit_burst: { type: integer, minimum: 1 }
+        retry_max_attempts: { type: integer, minimum: 1 }
+
+    PluginStatus:
+      type: object
+      properties:
+        ingestion_watchdog_tripped: { type: boolean }
+        next_cursor:
+          type: "null"
+          description: The registered plugin set is fixed at compile time and small, so there is never a next page.
+        next: { type: "null" }
+        watch_set:
+          type: object
+          properties:
+            domains: { type: integer }
+            variants: { type: integer }
+            allowlisted: { type: integer }
+        plugins:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              enabled: { type: boolean }
+              pre_filtered:
+                type: boolean
+                description: |
+                  Whether the plugin applied the watchlist before reporting.
+                  Informational — the matcher runs downstream either way, so
+                  filtered and unfiltered sources classify identically.
+              last_observation_at: { type: [string, "null"], format: date-time }
+              last_success_at: { type: [string, "null"], format: date-time }
+              lag_seconds: { type: number }
+              observations_total: { type: integer, format: int64 }
+              last_error: { type: string }
+              _self: { type: string, description: "GET this for the plugin's own detail — see PluginDetail." }
+              logs:
+                type: array
+                description: Per-log identity and last checkpoint. Absent for plugins with no per-log concept (certstream, the SSLMate backfill).
+                items:
+                  type: object
+                  properties:
+                    log_id: { type: string }
+                    url: { type: string, description: Empty when the log couldn't be resolved to a human name. }
+                    checkpoint_at: { type: [string, "null"], format: date-time }
+                    _self:
+                      type: string
+                      description: GET this for the log's full detail — see PluginLogDetail.
+
+    PluginDetail:
+      type: object
+      description: |
+        The same fields as one PluginStatus.plugins[] entry, plus each log's
+        full checkpoint state.
+      properties:
+        name: { type: string }
+        enabled: { type: boolean }
+        pre_filtered: { type: boolean }
+        last_observation_at: { type: [string, "null"], format: date-time }
+        last_success_at: { type: [string, "null"], format: date-time }
+        lag_seconds: { type: number }
+        observations_total: { type: integer, format: int64 }
+        last_error: { type: string }
+        _self: { type: string }
+        logs:
+          type: array
+          items: { $ref: "#/components/schemas/PluginLogDetail" }
+
+    PluginLogDetail:
+      type: object
+      properties:
+        log_id: { type: string }
+        url: { type: string }
+        description: { type: string }
+        checkpoint_size:
+          type: integer
+          format: int64
+          description: Entries verified against a signed tree head.
+        checkpoint_at: { type: [string, "null"], format: date-time }
+        checkpoint_age:
+          type: string
+          pattern: "^[0-9]{2,}:[0-9]{2}:[0-9]{2}$"
+          description: Elapsed time since checkpoint_at, as HH:MM:SS. Hours are not capped at 24. Absent when checkpoint_at is null.
+        download_size:
+          type: integer
+          format: int64
+          description: Entries fetched but not yet verified.
+        backlog:
+          type: integer
+          format: int64
+          description: download_size - checkpoint_size — real lag between "we have the bytes" and "we trust the position".
+        last_error: { type: string }
+        last_error_at: { type: [string, "null"], format: date-time }
+        _self: { type: string }
+
+    PluginConfig:
+      type: object
+      properties:
+        plugin: { type: string }
+        configured:
+          type: boolean
+          description: Whether an admin has ever written a DB override for this plugin. False means enabled/source/url below reflect config.yaml's own values, not a stored row.
+        enabled: { type: boolean }
+        source:
+          type: string
+          enum: [self_hosted, calidog_public]
+          description: self_hosted is an operator-run certstream-server-rust sidecar; calidog_public is the free hosted feed — guarded, not recommended for production (see GET /plugins/{id}/config's description).
+        url: { type: string }
+        auth_token_set:
+          type: boolean
+          description: Whether a bearer token is currently stored. The token itself is never returned once written.
+        updated_at: { type: [string, "null"], format: date-time }
+        updated_by: { type: string }
+        applied_live:
+          type: boolean
+          description: Whether the running plugin process is actually using these settings, as opposed to config.yaml's own values.
+        _self: { type: string }
+
+    PluginConfigWrite:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        source:
+          type: string
+          enum: [self_hosted, calidog_public]
+          default: self_hosted
+        url:
+          type: string
+          description: SSE (http/https) or WebSocket (ws/wss) endpoint. Empty uses the plugin's built-in default for source.
+        auth_token:
+          type: [string, "null"]
+          description: Omit to leave any already-stored token untouched; an explicit empty string clears it.

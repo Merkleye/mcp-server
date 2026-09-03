@@ -1,0 +1,59 @@
+# Merkleye MCP server — example configuration.
+#
+# Every key here is optional; the defaults are what you get with no file at all.
+# Validation is strict: an unknown key is an error, not something skipped, and
+# every error names the key it is about.
+
+server:
+  # Streamable HTTP listen address. Ignored under --transport=stdio.
+  bind: "0.0.0.0:8090"
+
+  # This server's externally reachable base URL, and therefore its OAuth
+  # resource identifier — what an access token's `aud` must name. It has to be
+  # the URL clients actually reach, not a loopback address that only means
+  # something inside the container. Required when auth.oidc.enabled is true.
+  public_url: "https://merkleye-mcp.example.com"
+
+merkleye:
+  base_url: "http://merkleyed:8080"
+  timeout: 30s
+  # static_token: stdio only, and better supplied as MERKLEYE_API_TOKEN.
+  # Refused outright for the http transport, where every caller brings their
+  # own credential.
+
+auth:
+  # bearer | oidc | both
+  mode: bearer
+
+  oidc:
+    # OIDC is SCAFFOLDED, not finished. Enabling it publishes the discovery
+    # document and the 401 challenge, but sign-in is refused with an
+    # explanation until merkleye grows POST /api/v1/auth/token/exchange.
+    # See docs/PLAN.md §4.4.
+    enabled: false
+
+    # Take the issuer from merkleye's own /api/v1/auth/config, so changing IdP
+    # is a backend config change and this server is not rebuilt or redeployed.
+    discovery_from_api: true
+
+    # Fallback for a merkleye that does not publish the issuer yet.
+    authorization_servers:
+      - "https://idp.example.com/application/o/merkleye/"
+
+    scopes_supported: [read, write, admin]
+    token_cache_ttl_margin: 1m
+
+tools:
+  # On by default. Connecting a write-scoped token is not the same as
+  # consenting to an agent mutating things.
+  read_only: true
+
+  # Irreversible and outward-facing tools — purging a domain, firing a test
+  # notification at a real human. Off even when read_only is false.
+  destructive: false
+
+  # The API allows up to 500 matches per page. A tool that returns 500 Match
+  # objects exhausts an agent's context and produces a worse answer than one
+  # returning 20.
+  default_limit: 20
+  max_limit: 100

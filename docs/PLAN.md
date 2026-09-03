@@ -1,6 +1,9 @@
 # Merkleye MCP Server — buildout plan
 
-Status: **plan, not yet built.** Nothing below has been implemented.
+Status: **phases 0–3 built; OIDC scaffolded; phase 4 not started.**
+See the README's status table for what actually runs today. This document
+remains the record of *why* the code looks like it does, including the
+decisions still open (§11).
 
 An MCP server that puts Merkleye's Certificate Transparency watchtower in
 front of an LLM agent: "what lookalike certs showed up for our domains this
@@ -55,7 +58,7 @@ node           = "22"       # npm distribution (§5.2), not implementation
 | Choice | Value | Why |
 | --- | --- | --- |
 | Language | Go 1.27 | Same toolchain, lint config and container story as merkleye; the API client generates from the same spec. |
-| MCP SDK | `github.com/modelcontextprotocol/go-sdk` **v1.7.0** | Official SDK. Negotiates protocol `2026-07-28`, back-compatible to `2024-11-05`. Ships `auth.RequireBearerToken` (pluggable `TokenVerifier`, emits the RFC 9728 `WWW-Authenticate` challenge) and `auth.ProtectedResourceMetadataHandler` — the two pieces §4 needs, rather than hand-rolled. |
+| MCP SDK | `github.com/modelcontextprotocol/go-sdk` **v1.7.0** | Official SDK. Supports protocol `2026-07-28` down to `2024-11-05`. Note that the legacy `initialize` handshake is capped at `2025-11-25` by the SDK on purpose — `initialize` is deprecated in `2026-07-28`, which is reached through the newer discovery path — so a client using `initialize` reports `2025-11-25`, and that is correct rather than a misconfiguration. Ships `auth.RequireBearerToken` (pluggable `TokenVerifier`, emits the RFC 9728 `WWW-Authenticate` challenge) and `auth.ProtectedResourceMetadataHandler` — the two pieces §4 needs, rather than hand-rolled. |
 | API client | generated from a pinned `openapi.yaml` | §3.1 |
 | Transports | Streamable HTTP + stdio | §5 |
 | Container | `Containerfile`, not `Dockerfile` | merkleye convention. |
@@ -462,10 +465,10 @@ stream is lossless.
 
 | Phase | Contents | Done when |
 | --- | --- | --- |
-| 0 | Repo scaffold, mise tools + tasks, CI, vendored spec, generated client, drift job | `mise run check` green on an empty tool set |
-| 1 | stdio transport, bearer pass-through, read-only triage tools, npm launcher | An agent answers "what matched this week" against a local merkleyed, from Claude Code and Claude Desktop |
-| 2 | **Upstream:** exchange route + `auth/config` discovery fields + DCR shim (§4.4). **Here:** Streamable HTTP, protected resource metadata, 401 challenge, exchange + cache | Live E2E against a real IdP; Claude Desktop custom connector completes its OAuth handshake |
-| 3 | Write tools behind `read_only`, resources, prompts | Full triage loop, live E2E |
+| 0 | ✅ Repo scaffold, mise tools + tasks, CI, vendored spec, generated client, drift check | Done |
+| 1 | ✅ stdio transport, bearer pass-through, read tools. npm launcher still outstanding | Done bar the npm launcher; verified end to end over stdio against a stub API |
+| 2 | 🟡 **Here:** Streamable HTTP, protected resource metadata, 401 challenge, exchange seam + cache — all built and verified. **Upstream, still to do:** the exchange route, `auth/config` discovery fields, DCR shim (§4.4). Until then `UnimplementedExchanger` refuses OIDC sign-in with an explanation | Blocked on the upstream PR. Live E2E against a real IdP still required |
+| 3 | ✅ Write tools behind `read_only`, destructive tools behind `destructive`, resources, prompts | Done; live E2E against a real merkleyed still required |
 | 4 | Live match subscriptions (§8) | Flagged, off by default |
 | — | `operationId`s upstream + matching merkleye-ui PR (§3.2) | Spec side open as [merkleye/merkleye#48](https://github.com/Merkleye/merkleye/pull/48); merkleye-ui PR still needed |
 

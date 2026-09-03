@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Runs before every commit. Installed automatically — `mise run hooks` points
+# git's core.hooksPath at this directory, and every other task depends on it.
+#
+# Mirrors CI minus govulncheck, which hits the network and is slow enough to be
+# CI-only. Bypass with `git commit --no-verify` if you really need to.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+# mise (this project's pinned toolchain) is tried first so the versions that
+# run here match what CI pins — not whatever happens to be globally installed.
+# Soft-skips only when neither resolves: never block a commit on a locally
+# missing optional tool, since CI runs it either way.
+run_step() {
+	local step="$1" tool="$2"
+	shift 2
+	if command -v mise >/dev/null 2>&1; then
+		echo "pre-commit: $step"
+		mise run "$@"
+		return
+	fi
+	if command -v "$tool" >/dev/null 2>&1; then
+		echo "pre-commit: $step (without mise)"
+		"$tool" "${@:2}"
+		return
+	fi
+	echo "$tool not found on PATH or via mise — skipping locally (CI still runs it)." >&2
+}
+
+echo "pre-commit: gofmt check"
+unformatted="$(gofmt -l . | grep -v '^internal/merkleyeapi/client.gen.go$' || true)"
+if [[ -n "$unformatted" ]]; then
+	echo "gofmt found unformatted files (run 'mise run fmt' and stage the result):" >&2
+	echo "$unformatted" >&2
+	exit 1
+fi
+
+run_step "lint" golangci-lint lint
+run_step "vet" go vet
+run_step "unit tests" go test
+run_step "spec drift" bash spec
