@@ -74,8 +74,15 @@ jobs:
       # has quietly diverged from upstream is the exact failure this repo's
       # split exists to prevent — the client would generate cleanly against a
       # contract the server no longer serves.
+      # merkleye is private, so this needs a credential that can read it — the
+      # default GITHUB_TOKEN is scoped to this repository only. Without one the
+      # script skips rather than fails, which would make this job silently
+      # stop checking; set MERKLEYE_SPEC_TOKEN (a PAT or App token with read
+      # access to merkleye/merkleye) as a repository secret.
       - name: Verify the vendored spec matches its pinned upstream
-        run: mise run spec || ./scripts/check-spec-drift.sh
+        env:
+          MERKLEYE_SPEC_TOKEN: ${{ secrets.MERKLEYE_SPEC_TOKEN }}
+        run: ./scripts/check-spec-drift.sh
 
   build:
     name: Build image

@@ -114,9 +114,20 @@ that works against a fake and not against the real thing. Two gates cover that,
 and neither is optional:
 
 - **Spec drift** (`mise run spec`, and CI's `spec` job) proves the vendored
-  `api/openapi.yaml` still matches the upstream release pinned in
+  `api/openapi.yaml` still matches the upstream commit pinned in
   `api/SPEC_VERSION`. A silently-diverged copy generates a client cleanly
   against a contract the server no longer serves.
+
+  merkleye is private, so this needs a token that can read it —
+  `MERKLEYE_SPEC_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN`. Without one the script
+  skips, so that a local hook works offline; CI sets `MERKLEYE_SPEC_TOKEN` and
+  is the authoritative gate. **Note that the default `GITHUB_TOKEN` in Actions
+  is scoped to this repository only** and cannot read merkleye — a PAT or App
+  token is required, or the job skips while appearing to pass.
+
+  When an upstream spec PR merges, re-pin to the *merged* commit on `main`, not
+  the branch commit: a squash merge gives the change a new SHA and the branch
+  is usually deleted, so the old pin 404s.
 - **A live E2E pass before anything ships.** Run the binary against a real
   `merkleyed` (mint a token with `merkleyed token create`) driven by a real MCP
   client — Claude Code, Claude Desktop, or the MCP Inspector. A mock passing is
