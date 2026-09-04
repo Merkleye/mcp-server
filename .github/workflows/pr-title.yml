@@ -5,13 +5,20 @@
 # The rules live in Merkleye/github-templates so the allowed type list is
 # maintained once for every Merkleye repo rather than drifting per repo.
 #
-# pull_request_target runs the check from the base branch, so the rules
-# cannot be edited by the PR under review. Nothing here checks out or
-# executes PR code, which is what makes that safe.
+# pull_request, not pull_request_target: the latter reads the workflow file
+# from the base branch, so a workflow that exists only on a PR branch never
+# runs at all -- the PR adding this check would get no signal from it, and it
+# would only start working after that PR merged. This way the adopting PR is
+# its own proof. Nothing here checks out or executes PR code, so both are
+# safe; pull_request_target is worth revisiting once this is on the default
+# branch.
+#
+# `edited` matters: without it, fixing a rejected title never re-runs the
+# check and the PR stays red.
 name: PR Title
 
 on:
-  pull_request_target:
+  pull_request:
     types:
       - opened
       - edited
