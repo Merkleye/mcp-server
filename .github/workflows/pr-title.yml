@@ -1,0 +1,30 @@
+# Validates that pull request titles follow the Conventional Commits spec
+# (https://www.conventionalcommits.org). This repo squash-merges, so the PR
+# title becomes the commit subject on the default branch.
+#
+# The rules live in Merkleye/github-templates so the allowed type list is
+# maintained once for every Merkleye repo rather than drifting per repo.
+#
+# pull_request_target runs the check from the base branch, so the rules
+# cannot be edited by the PR under review. Nothing here checks out or
+# executes PR code, which is what makes that safe.
+name: PR Title
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    # Matches the permissions the called job requests. A called workflow can
+    # narrow the token but never widen it, so this has to be granted here.
+    permissions:
+      pull-requests: read
+    uses: Merkleye/github-templates/.github/workflows/pr-title.yml@v1
