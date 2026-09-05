@@ -34,4 +34,4 @@ jobs:
     # narrow the token but never widen it, so this has to be granted here.
     permissions:
       pull-requests: read
-    uses: Merkleye/github-templates/.github/workflows/pr-title.yml@v1
+    uses: Merkleye/github-templates/.github/workflows/pr-title.yml@main
