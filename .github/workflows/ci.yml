@@ -24,7 +24,7 @@ jobs:
       # definition of what "check" means.
       - uses: jdx/mise-action@v2
         with:
-          version: 2026.8.1
+          version: 2026.9.1
           install: true
           cache: true
 
@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
         with:
-          version: 2026.8.1
+          version: 2026.9.1
           install: true
           cache: true
       - run: mise run govulncheck
@@ -66,7 +66,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - run: pip install pyyaml
 
       # The authoritative drift gate. The local hook skips this when it cannot
