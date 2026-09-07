@@ -58,11 +58,9 @@ jobs:
       # mise provisions the toolchain pinned in mise.toml, and CI runs the same
       # tasks a contributor runs locally — there is no second definition of
       # what "check" means.
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+      - uses: Merkleye/github-templates/.github/actions/setup-mise@main
         with:
           version: 2026.9.1
-          install: true
-          cache: true
 
       # Fetches the spec from the commit pinned in api/SPEC_VERSION, validates
       # it, then generates the client from it.
@@ -97,11 +95,9 @@ jobs:
         with:
           python-version: "3.14"
       - run: pip install pyyaml
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+      - uses: Merkleye/github-templates/.github/actions/setup-mise@main
         with:
           version: 2026.9.1
-          install: true
-          cache: true
       - name: Check for known vulnerabilities
         run: mise run govulncheck
 
