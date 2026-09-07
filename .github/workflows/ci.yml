@@ -22,11 +22,16 @@ jobs:
       # mise provisions the exact toolchain pinned in mise.toml, and CI runs
       # the same tasks a contributor runs locally — there is no second
       # definition of what "check" means.
-      - uses: jdx/mise-action@v2
+      #
+      # Through the shared action rather than jdx/mise-action directly: that
+      # keeps one pinned mise-action commit for the whole org instead of a
+      # mutable `@v2` here and a different pin in every other repo, which is
+      # exactly the drift merkleye's ci.yml and perf.yml had already grown.
+      # The mise version stays explicit — this repo's npm-backend behaviour is
+      # version-sensitive, so it is not something to let float.
+      - uses: Merkleye/github-templates/.github/actions/setup-mise@main
         with:
           version: 2026.8.1
-          install: true
-          cache: true
 
       - run: mise run generate
       - run: mise run fmt-check
@@ -52,11 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
+      - uses: Merkleye/github-templates/.github/actions/setup-mise@main
         with:
           version: 2026.8.1
-          install: true
-          cache: true
       - run: mise run govulncheck
 
   spec:
