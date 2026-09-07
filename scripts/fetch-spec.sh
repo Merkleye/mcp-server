@@ -119,7 +119,12 @@ case "$status" in
 
 			# Classic PATs advertise their scopes on every response; fine-grained
 			# ones send the header empty, which is itself a useful signal.
-			scopes="$(grep -i '^x-oauth-scopes:' "$whoami_headers" 2>/dev/null | cut -d: -f2- | tr -d '\r' | sed 's/^ *//')"
+			# `|| true` is load-bearing. A fine-grained PAT sends no
+			# x-oauth-scopes header, so grep exits 1; under `set -euo pipefail`
+			# that kills the script inside the command substitution, before any
+			# of the diagnostics below print. The first version of this code did
+			# exactly that and turned a helpful error into a silent exit 1.
+			scopes="$(grep -i '^x-oauth-scopes:' "$whoami_headers" 2>/dev/null | cut -d: -f2- | tr -d '\r' | sed 's/^ *//' || true)"
 			rm -f "$whoami_body" "$whoami_headers"
 
 			echo "Credential in use: ${identity}." >&2
@@ -135,8 +140,9 @@ case "$status" in
 The token cannot read merkleye/merkleye (GET /repos/merkleye/merkleye returned
 HTTP ${repo_status}).
 
-merkleye is private, and GitHub answers 404 rather than 403 for a private
-repository a token cannot see -- so this is an access problem, not a bad pin.
+Either status means the same thing here: 404 because GitHub hides a private
+repository a token cannot see, 403 because it can see it but may not read it.
+Either way this is an access problem, not a bad pin.
 
 In GitHub Actions the default GITHUB_TOKEN is scoped to this repository only
 and can never read merkleye. MERKLEYE_BACKEND_TOKEN is the organization secret
