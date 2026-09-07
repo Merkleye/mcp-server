@@ -5,7 +5,7 @@
 # It is merkleye's private product contract and is not stored in this
 # repository, so the build cannot fetch it and neither can this Containerfile —
 # doing so would mean handing a GitHub token to the builder. Run
-# `./scripts/fetch-spec.sh` first (it needs MERKLEYE_SPEC_TOKEN); the spec is
+# `./scripts/fetch-spec.sh` first (it needs MERKLEYE_BACKEND_TOKEN); the spec is
 # consumed by the build stage only and never reaches the final image.
 FROM golang:1.27-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build
 

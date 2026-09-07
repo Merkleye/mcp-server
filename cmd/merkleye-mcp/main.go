@@ -166,7 +166,9 @@ func runHTTP(ctx context.Context, cfg config.Config, api *merkleyeapi.API, logge
 	mux.Handle("/mcp", auth.RequireCredential(verifier, resourceMetadataURL, cfg.Auth.OIDC.ScopesSupported)(handler))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"status":"ok"}`)
+		// Discarded deliberately: the only way this fails is the caller having
+		// gone away mid-write, and there is nothing left to tell them.
+		_, _ = fmt.Fprintln(w, `{"status":"ok"}`)
 	})
 
 	httpSrv := &http.Server{

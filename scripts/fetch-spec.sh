@@ -12,9 +12,13 @@
 # newer merkleye is a one-line change to api/SPEC_VERSION.
 #
 # merkleye is private, so this needs a credential that can read it:
-# MERKLEYE_SPEC_TOKEN, GH_TOKEN or GITHUB_TOKEN, in that order. In Actions the
-# default GITHUB_TOKEN is scoped to *this* repository and cannot read merkleye,
-# so a PAT or App token has to be supplied as MERKLEYE_SPEC_TOKEN.
+# MERKLEYE_BACKEND_TOKEN, GH_TOKEN or GITHUB_TOKEN, in that order.
+#
+# MERKLEYE_BACKEND_TOKEN is an organization secret, named for what it grants —
+# read access to the merkleye backend repository — rather than for what any one
+# consumer does with it, so every repo that needs the backend uses the same
+# name. In Actions the default GITHUB_TOKEN is scoped to *this* repository and
+# can never read merkleye.
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -36,18 +40,19 @@ if [ -f "$OUT" ] && [ -f "api/.spec-fetched-at" ] && [ "$(cat api/.spec-fetched-
 	exit 0
 fi
 
-token="${MERKLEYE_SPEC_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+token="${MERKLEYE_BACKEND_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
 if [ -z "$token" ]; then
 	cat >&2 <<'MSG'
-No GitHub token available (MERKLEYE_SPEC_TOKEN, GH_TOKEN or GITHUB_TOKEN).
+No GitHub token available (MERKLEYE_BACKEND_TOKEN, GH_TOKEN or GITHUB_TOKEN).
 
 merkleye is private and its OpenAPI spec is not vendored here, so the client
 cannot be generated without a credential that can read merkleye/merkleye.
 
-  export MERKLEYE_SPEC_TOKEN=<a PAT or App token with read access>
+  export MERKLEYE_BACKEND_TOKEN=<a PAT or App token with read access>
 
 In GitHub Actions, the default GITHUB_TOKEN is scoped to this repository only
-and will not work; set MERKLEYE_SPEC_TOKEN as a repository secret.
+and will not work. MERKLEYE_BACKEND_TOKEN is an organization secret; check that
+this repository is in its access list.
 MSG
 	exit 1
 fi
@@ -87,16 +92,62 @@ case "$status" in
 			-o /dev/null 2>/dev/null || echo "000")"
 
 		if [ "$repo_status" != "200" ]; then
+			# Name the credential. "A token cannot read merkleye" is a fact;
+			# "the token is acting as <who>, with these scopes" is usually the
+			# fix, because the wrong identity or a missing scope is visible at a
+			# glance. Never prints the token itself.
+			whoami_body="$(mktemp)"
+			whoami_headers="$(mktemp)"
+			whoami_status="$(curl -sSL --max-time 30 \
+				-H "Authorization: Bearer ${token}" \
+				-H "X-GitHub-Api-Version: 2022-11-28" \
+				-D "$whoami_headers" -o "$whoami_body" \
+				-w '%{http_code}' "https://api.github.com/user" 2>/dev/null || echo "000")"
+
+			identity="could not be determined"
+			case "$whoami_status" in
+				200)
+					login="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("login","?"))' "$whoami_body" 2>/dev/null || echo "?")"
+					identity="a user token acting as '${login}'"
+					;;
+				403 | 401)
+					# App installation tokens have no /user; that is expected,
+					# and points at a different fix (install the App).
+					identity="most likely a GitHub App installation token (no /user identity)"
+					;;
+			esac
+
+			# Classic PATs advertise their scopes on every response; fine-grained
+			# ones send the header empty, which is itself a useful signal.
+			# `|| true` is load-bearing. A fine-grained PAT sends no
+			# x-oauth-scopes header, so grep exits 1; under `set -euo pipefail`
+			# that kills the script inside the command substitution, before any
+			# of the diagnostics below print. The first version of this code did
+			# exactly that and turned a helpful error into a silent exit 1.
+			scopes="$(grep -i '^x-oauth-scopes:' "$whoami_headers" 2>/dev/null | cut -d: -f2- | tr -d '\r' | sed 's/^ *//' || true)"
+			rm -f "$whoami_body" "$whoami_headers"
+
+			echo "Credential in use: ${identity}." >&2
+			if [ -n "$scopes" ]; then
+				echo "Classic PAT scopes: ${scopes} (reading a private repo needs 'repo')." >&2
+			else
+				echo "No x-oauth-scopes header: a fine-grained PAT or an App token." >&2
+				echo "Fine-grained PATs must list merkleye/merkleye explicitly and grant Contents: Read." >&2
+			fi
+			echo >&2
+
 			cat >&2 <<MSG
 The token cannot read merkleye/merkleye (GET /repos/merkleye/merkleye returned
 HTTP ${repo_status}).
 
-merkleye is private, and GitHub answers 404 rather than 403 for a private
-repository a token cannot see -- so this is an access problem, not a bad pin.
+Either status means the same thing here: 404 because GitHub hides a private
+repository a token cannot see, 403 because it can see it but may not read it.
+Either way this is an access problem, not a bad pin.
 
 In GitHub Actions the default GITHUB_TOKEN is scoped to this repository only
-and can never read merkleye. Set MERKLEYE_SPEC_TOKEN to a PAT or App token with
-read access to merkleye/merkleye, as a repository secret.
+and can never read merkleye. MERKLEYE_BACKEND_TOKEN is the organization secret
+that does; if it is set, check that this repository is in its access list and
+that the token itself still has read access to merkleye/merkleye.
 MSG
 		else
 			cat >&2 <<MSG
