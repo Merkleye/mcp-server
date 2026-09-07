@@ -1,8 +1,15 @@
 name: CI
 
+# This repository has no `main`: its default branch is
+# claude/merkleyes-mcp-server-5wezpz, which is what every PR targets. The push
+# trigger named `main` therefore never fired, so nothing had ever run outside a
+# pull request. Watching the default branch by name via the built-in context
+# keeps that true if the branch is ever renamed.
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - claude/merkleyes-mcp-server-5wezpz
   pull_request:
 
 permissions:
