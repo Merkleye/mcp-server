@@ -43,6 +43,11 @@ var variantSummary = []string{
 	"kind",
 	"registration",
 	"ns_resolves",
+	// Added upstream in merkleye@2ce4b5e. Carried in the summary because it
+	// changes what a triage decision means: an allowlisted variant is one
+	// somebody already judged benign, and an agent that cannot see that will
+	// re-litigate it.
+	"allowlisted",
 	"variant_set_id",
 	"created_at",
 }

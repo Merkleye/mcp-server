@@ -120,12 +120,22 @@ paths:
         - name: cursor
           in: query
           description: The `id` of the last item on the previous page (from `next_cursor`).
-          schema: { type: integer }
-        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The integer form is what a caller sends.
+            anyOf:
+              - { type: integer, format: int64, minimum: -9223372036854775808, maximum: 9223372036854775807 }
+              - { type: string, maxLength: 0 }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
         - name: page
           in: query
           description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
-          schema: { type: integer, minimum: 1, maximum: 2147483647 }
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The integer form is what a caller sends.
+            anyOf:
+              - { type: integer, minimum: 1, maximum: 2147483647 }
+              - { type: string, maxLength: 0 }
       responses:
         "200":
           description: OK
@@ -148,10 +158,19 @@ paths:
                     type: integer
                     description: Row count matching the current filters, independent of cursor/limit/page.
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     post:
       tags: [domains]
       operationId: createDomain
       summary: Create a watched domain
+      description: |
+        The name must be free. It is unique across every row, deleted or not:
+        a soft-deleted domain keeps its name until it is restored or purged,
+        so re-adding one 409s with
+        `https://merkleye.dev/problems/domain-name-held-by-deleted` naming the
+        row that holds it, rather than silently creating a second domain whose
+        namesake's matches and variant sets nothing can reach any more.
       requestBody:
         required: true
         content:
@@ -165,6 +184,8 @@ paths:
               schema: { $ref: "#/components/schemas/Domain" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "409": { $ref: "#/components/responses/Conflict" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}:
     parameters:
@@ -180,6 +201,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Domain" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     patch:
       tags: [domains]
       operationId: updateDomain
@@ -198,6 +222,8 @@ paths:
               schema: { $ref: "#/components/schemas/Domain" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     delete:
       tags: [domains]
       operationId: deleteDomain
@@ -207,9 +233,16 @@ paths:
         references it are untouched, and GET simply stops returning it.
         Reversible via POST .../restore. See DELETE .../purge for the
         permanent version.
+
+        The domain keeps its name while deleted — POST /domains for that name
+        409s until this row is restored or purged — so a name always has one
+        row and one history.
       responses:
         "204": { description: No Content }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/restore:
     parameters:
@@ -218,7 +251,14 @@ paths:
       tags: [domains]
       operationId: restoreDomain
       summary: Restore a soft-deleted domain
-      description: Undoes DELETE /domains/{id}. 404 for a domain that is live (nothing to restore) or does not exist.
+      description: |
+        Undoes DELETE /domains/{id}. 404 for a domain that is live (nothing
+        to restore) or does not exist.
+
+        Cannot conflict on the name: a soft-deleted domain holds its name for
+        as long as it exists, so nothing can have taken it in the meantime.
+        That collision surfaces at POST /domains instead, before a second row
+        for the name could exist.
       responses:
         "200":
           description: OK
@@ -226,7 +266,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Domain" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Conflict" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/purge:
     parameters:
@@ -241,14 +283,28 @@ paths:
         calling this on a live domain 409s
         (domain-not-deleted) rather than deleting it in one step. Purge is
         only ever the second step of a two-step remove
-        (DELETE /domains/{id} first, then this). Also fails with 409
-        (domain-still-referenced) if matches or variant sets still
-        reference the domain — remove those first. See the Conflict
-        response for both `type` values.
+        (DELETE /domains/{id} first, then this).
+
+        It removes the domain's recorded history with it: its matches and
+        any alerts queued for them, its variant sets with their variants
+        and variant-change history, its issuer policies and its backfill
+        jobs, all in one transaction. Certificates are shared across
+        domains and are never deleted here. CT sightings are not deleted
+        here either, but they are not kept indefinitely: they expire on
+        their own retention window (`storage.observation_ttl`, 24h by
+        default) regardless of which domains exist.
+        Keeping the findings means stopping at DELETE /domains/{id}.
+
+        409 (domain-still-referenced) is a backstop for a reference the
+        cascade does not clear; when it fires nothing was deleted. See the
+        Conflict response for both `type` values.
       responses:
         "204": { description: No Content }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/policies:
     parameters:
@@ -264,6 +320,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/IssuerPolicy" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     put:
       tags: [domains]
       operationId: replaceDomainIssuerPolicy
@@ -281,6 +340,8 @@ paths:
               schema: { $ref: "#/components/schemas/IssuerPolicy" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/settings/variants:
     get:
@@ -298,6 +359,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VariantSettings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     put:
       tags: [settings]
       operationId: replaceVariantSettings
@@ -314,6 +378,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/VariantSettings" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/settings/scoring:
     get:
@@ -332,6 +398,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ScoringSettings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     put:
       tags: [settings]
       operationId: replaceScoringSettings
@@ -348,6 +417,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ScoringSettings" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/caa:
     parameters:
@@ -360,14 +431,19 @@ paths:
           records. Omitted (the default) leaves wildcard issuance governed
           by the same CAs as non-wildcard issuance, per RFC 8659's fallback
           from issuewild to issue.
-        schema: { type: boolean, default: false }
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean, default: false }
+            - { type: string, maxLength: 0 }
       - name: iodef
         in: query
         description: |
           Adds an `iodef` record: a CA that must refuse an issuance request
           can report the attempt here. Must be a `mailto:` address or an
           `https://` URL.
-        schema: { type: string }
+        schema: { type: string, pattern: "^\\s*(mailto:|https://)\\S" }
       - name: cas
         in: query
         description: |
@@ -377,7 +453,7 @@ paths:
           Does not modify the stored policy — a generation input for this
           request only, e.g. for previewing a CA set in the UI before
           deciding whether to persist it to config.yaml.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*[^,\\u0000\\s][^\\u0000]*$" }
       - name: exclude_cas
         in: query
         description: |
@@ -389,7 +465,7 @@ paths:
           on a config.yaml deploy to remove it from expected_issuers. An
           entry that doesn't match a known CA is reported in `warnings`
           rather than silently ignored.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*[^,\\u0000\\s][^\\u0000]*$" }
     get:
       tags: [domains]
       operationId: getDomainCAA
@@ -422,6 +498,8 @@ paths:
               schema: { $ref: "#/components/schemas/CAAResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/dns-provider:
     parameters:
@@ -449,14 +527,17 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DNSProviderResult" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/cas:
     get:
       tags: [domains]
       operationId: listKnownCAs
-      summary: List the known CA catalog CAA generation resolves against
+      summary: List the CA catalog CAA generation resolves against
       description: |
-        The fixed, global list of publicly-trusted CAs internal/caa.KnownCAs
+        The global list of publicly-trusted CAs internal/caa.KnownCAs
         recognizes — what `expected_issuers`, and GET /domains/{id}/caa's own
         `cas`/`exclude_cas` params, resolve identifiers against to produce an
         `issue` hostname. Not domain-scoped and nothing here is per-domain
@@ -465,25 +546,132 @@ paths:
         free-typing names that may or may not match — see the unmapped-issuer
         note on GET /domains/{id}/caa for what happens when they don't.
 
-        Each CA's identifier aliases (e.g. "GeoTrust" also resolving to
-        DigiCert) are deliberately not exposed here — they exist only so
-        free-text `expected_issuers` entries match, not as additional
-        selectable identities. Use `name` as the value to send back in `cas`/
+        With `includeUserCAs=true` the stored catalog is merged in: CCADB's
+        published CAA identifiers (a snapshot shipped in the binary and
+        applied at boot, so it changes on release, not on a schedule) plus
+        every CA an admin added through POST /api/v1/cas. That is a far more complete picker, and it is read from
+        the database on every request, so a CA added a second ago is already
+        here — no restart, no cache to wait out.
+
+        Note what the two halves are for. Only `source: curated` entries
+        participate in CAA record *generation*: `expected_issuers`, `cas` and
+        `exclude_cas` resolve through internal/caa.LookupCA, which knows the
+        curated list alone. A `ccadb` or `operator` entry is a catalog and
+        picker entry — sending its name in `cas` today lands in
+        `unmapped_issuers` rather than producing a record.
+
+        Entries are deduplicated on `issue_hostname` with the curated entry
+        winning, so a CA present in both renders once, under the reviewed
+        name. Curated aliases (e.g. "GeoTrust" also resolving to DigiCert)
+        are deliberately not exposed — they exist only so free-text
+        `expected_issuers` entries match, not as additional selectable
+        identities. Use `name` as the value to send back in `cas`/
         `exclude_cas`.
+      parameters:
+        - name: includeUserCAs
+          in: query
+          description: |
+            Merge the stored catalog (CCADB-mirrored + operator-added CAs)
+            into the response. Absent or false serves only the curated
+            in-process list, which is exactly what this endpoint returned
+            before the stored catalog existed. `include_user_cas` below is
+            an accepted snake_case alias, matching every other query
+            parameter in this API; this spelling wins if both are sent.
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The boolean form is what a caller sends.
+            anyOf:
+              - { type: boolean, default: false }
+              - { type: string, maxLength: 0 }
+        - name: include_user_cas
+          in: query
+          description: |
+            snake_case alias for `includeUserCAs`, which is the spelling the
+            UI sends. Declared rather than merely described in prose because
+            an undeclared query parameter is now rejected with 400 — a
+            parameter the handler honours has to appear here or it stops
+            working. See ADR-0060.
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The boolean form is what a caller sends.
+            anyOf:
+              - { type: boolean, default: false }
+              - { type: string, maxLength: 0 }
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/KnownCAsResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [domains]
+      operationId: createCA
+      summary: Add a CA to the catalog
+      description: |
+        Registers a CA neither the curated list nor CCADB carries — a private
+        PKI, an internal issuing hierarchy, or a CA newer than the last CCADB
+        sync — so it becomes selectable wherever the catalog is offered
+        (GET /api/v1/cas with `includeUserCAs=true`).
+
+        Admin-scoped because this is global configuration rather than
+        per-domain data: it changes every domain's CA picker, the same bar
+        PUT /plugins/{id}/config sits behind.
+
+        The row is always operator-owned (`system_managed: false`,
+        `source: operator`) and there is no way to create a system-managed
+        one — a row carrying that flag would be deleted by the next CCADB
+        sync, which owns them. `identifier` must be a dotted ASCII hostname:
+        it is published verbatim in a CAA `issue` record.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CAWrite" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CA" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/cas/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    delete:
+      tags: [domains]
+      operationId: deleteCA
+      summary: Remove an operator-added CA from the catalog
+      description: |
+        Permanent, and admin-scoped for the same reason POST /api/v1/cas is.
+
+        Only CAs added through POST /api/v1/cas can be deleted. A
+        CCADB-mirrored row (`system_managed: true`) is refused with 409: the
+        catalog sync owns those rows and would recreate this one on its next
+        run, so accepting the delete would report a success that silently
+        undoes itself. Curated entries have no `id` at all and so cannot be
+        addressed here.
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/variants:
     parameters:
       - $ref: "#/components/parameters/Id"
-      - { name: cursor, in: query, schema: { type: string } }
-      - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
-      - { name: algorithm, in: query, schema: { type: string } }
-      - { name: tld, in: query, schema: { type: string } }
+      - { name: cursor, in: query, schema: { type: integer, format: int64 } }
+      - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+      - { name: algorithm, in: query, schema: { type: string, pattern: "^[^\\u0000]*$" } }
+      - { name: tld, in: query, schema: { type: string, pattern: "^[^\\u0000]*$" } }
       - name: registration
         in: query
         description: RDAP's verdict. `unknown` means no RDAP answer is available for the name, which is not the same as unregistered.
@@ -491,11 +679,56 @@ paths:
       - name: registered
         in: query
         description: Boolean shorthand for `registration` — true selects `registered`, false selects `unregistered`. `registration` wins if both are given.
-        schema: { type: boolean }
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: q
+        in: query
+        description: Case-insensitive substring of the lookalike's own fqdn.
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
+      - name: ns_resolves
+        in: query
+        description: Whether the name has nameservers delegated. Omit to not filter on it — `false` is a real answer, not the absence of one.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: resolves
+        in: query
+        description: Whether the name has an A or AAAA record. Omit to not filter on it — `false` is a real answer, not the absence of one.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: has_mx
+        in: query
+        description: |
+          Whether the name publishes any MX host. Omit to not filter on it —
+          `false` is a real answer ("probed, takes no mail"), and it also
+          covers a variant nothing has scanned since the field existed, so
+          the two values partition the set.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
       - name: page
         in: query
         description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
-        schema: { type: integer, minimum: 1, maximum: 2147483647 }
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The integer form is what a caller sends.
+          anyOf:
+            - { type: integer, minimum: 1, maximum: 2147483647 }
+            - { type: string, maxLength: 0 }
     get:
       tags: [variants]
       operationId: listDomainVariants
@@ -513,23 +746,126 @@ paths:
           description: OK
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  variants:
-                    type: array
-                    items: { $ref: "#/components/schemas/Variant" }
-                  next_cursor: { type: [string, "null"] }
-                  next:
-                    type: [string, "null"]
-                    description: |
-                      The full request path + query string for the next page —
-                      this request's own filters, plus `cursor`. Null when
-                      there is no next page.
-                  total:
-                    type: integer
-                    description: Row count matching the current filters, independent of cursor/limit/page.
+              schema: { $ref: "#/components/schemas/VariantListResponse" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/variants:
+    parameters:
+      - { name: cursor, in: query, schema: { type: integer, format: int64 } }
+      - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+      - name: domain_id
+        in: query
+        description: Restrict to one watched domain's lookalikes — the same id as GET /domains/{id}. Omit for every watched domain at once.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The integer form is what a caller sends.
+          anyOf:
+            - { type: integer, format: int64, minimum: 1, maximum: 9223372036854775807 }
+            - { type: string, maxLength: 0 }
+      - { name: algorithm, in: query, schema: { type: string, pattern: "^[^\\u0000]*$" } }
+      - { name: tld, in: query, schema: { type: string, pattern: "^[^\\u0000]*$" } }
+      - name: q
+        in: query
+        description: Case-insensitive substring of the lookalike's own fqdn.
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
+      - name: registration
+        in: query
+        description: RDAP's verdict. `unknown` means no RDAP answer is available for the name, which is not the same as unregistered.
+        schema: { type: string, enum: [registered, unregistered, unknown] }
+      - name: registered
+        in: query
+        description: Boolean shorthand for `registration` — true selects `registered`, false selects `unregistered`. `registration` wins if both are given.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: ns_resolves
+        in: query
+        description: |
+          Whether the name has nameservers delegated. Omit to not filter on
+          it — `false` is a real answer ("scanned, nothing delegated"), not
+          the absence of one.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: resolves
+        in: query
+        description: Whether the name has an A or AAAA record. Omit to not filter on it — `false` is a real answer, not the absence of one.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: has_mx
+        in: query
+        description: |
+          Whether the name publishes any MX host. Omit to not filter on it —
+          `false` is a real answer ("probed, takes no mail"), and it also
+          covers a variant nothing has scanned since the field existed, so
+          the two values partition the set.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: page
+        in: query
+        description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The integer form is what a caller sends.
+          anyOf:
+            - { type: integer, minimum: 1, maximum: 2147483647 }
+            - { type: string, maxLength: 0 }
+    get:
+      tags: [variants]
+      operationId: listVariants
+      summary: List generated lookalikes across every watched domain
+      description: |
+        GET /domains/{id}/variants with the domain scope lifted: every watched
+        domain's current (active) VariantSet in one filterable, paged list.
+
+        This is what makes the generated watch set answerable. A deployment
+        watching a dozen domains generates five or six figures of lookalikes,
+        and questions worth asking about them ("which registered ones resolve",
+        "every `.zip` homoglyph anywhere") do not fit inside one domain — asked
+        per domain they turn into a dozen paginated lists the caller has to
+        merge by hand, with no honest `total` at the end of it.
+
+        Deactivated variant sets are excluded, exactly as the per-domain list
+        excludes them (DESIGN G-10): they are kept for provenance, and
+        including them here would render a name that survived a regeneration
+        once per generation it survived.
+
+        `total` counts rows matching the filters, so a pager can render "page 7
+        of 40" from the first response. Registration and DNS state are the
+        variant scanner's latest, not generation-time — `last_checked_at` is
+        null for a name nothing has scanned yet.
+
+        Note what is not a filter here: `allowlisted` on each variant is
+        derived from the live matcher snapshot rather than stored on the row
+        (see the Variant schema), so it cannot be pushed into the query
+        without making `total` disagree with the rows returned. Filter it
+        client-side, or read GET /allowlist for the entries themselves.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VariantListResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/variants/{id}:
     parameters:
@@ -550,12 +886,83 @@ paths:
               schema: { $ref: "#/components/schemas/Variant" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/variants/{id}/allowlist:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [variants]
+      operationId: allowlistVariant
+      summary: Mark a variant as not a threat
+      description: |
+        Suppresses this lookalike entirely: no certificate on it, or on any
+        hostname under it, produces a match again. Use for a name you
+        registered defensively, a real unrelated business, or a parked name
+        you have already looked at.
+
+        Broader than POST /matches/{id}/allowlist, which by default answers
+        "this certificate is fine" and silences one hostname. This route
+        writes the variant's registrable domain, so everything beneath it is
+        covered.
+
+        The judgement is stored as an allowlist entry (GET /allowlist), not
+        as a flag on the variant, so it survives regeneration into a new
+        variant set — see DESIGN G-09 and G-10. Already allowlisted returns
+        200 with the standing entry rather than a conflict.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: |
+                    Why this is benign. Unexplained allowlist entries are
+                    indistinguishable from mistakes six months later.
+      responses:
+        "201":
+          description: Allowlisted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AllowlistEntry" }
+        "200":
+          description: Already allowlisted; the standing entry
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AllowlistEntry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      tags: [variants]
+      operationId: unallowlistVariant
+      summary: Un-mark a variant as not a threat
+      description: |
+        Undo of the POST, addressed by the variant so a caller looking at
+        one does not have to find which allowlist entry covers it. Removes
+        only the entry for the variant's own name; a narrower hostname entry
+        beneath it (written by POST /matches/{id}/allowlist) is a separate
+        judgement and stays — use DELETE /allowlist/{id} for that.
+      responses:
+        "204": { description: Removed }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404":
+          description: No such variant, or it is not allowlisted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/variant-changes:
     parameters:
       - $ref: "#/components/parameters/Id"
-      - { name: cursor, in: query, schema: { type: string } }
-      - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+      - { name: cursor, in: query, schema: { type: integer, format: int64 } }
+      - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
     get:
       tags: [variants]
       operationId: listDomainVariantChanges
@@ -588,6 +995,9 @@ paths:
                     type: integer
                     description: Total transitions recorded for this domain's active set.
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/variants/regenerate:
     parameters:
@@ -599,25 +1009,30 @@ paths:
           set, e.g. `homoglyph,cyrillic,tld-swap`. Each value must be one of
           the algorithms dnstwist supports; an unrecognized name is a 400,
           not a silently-empty result.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*[^,\\u0000\\s][^\\u0000]*$" }
       - name: tlds
         in: query
         description: |
           Comma-separated TLDs to permute against instead of
           variants.default_tlds, e.g. `com,net,io`.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*[^,\\u0000\\s][^\\u0000]*$" }
       - name: dictionary
         in: query
         description: |
           Comma-separated dictionary words fed to the `dictionary` fuzzer
           instead of variants.default_dictionary, e.g. `login,secure,verify`.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*[^,\\u0000\\s][^\\u0000]*$" }
       - name: max_variants
         in: query
         description: |
           Overrides variants.max_per_domain for this run — the cap after
           which the sidecar reports the result as truncated.
-        schema: { type: integer, minimum: 1 }
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The integer form is what a caller sends.
+          anyOf:
+            - { type: integer, minimum: 1, maximum: 9223372036854775807 }
+            - { type: string, maxLength: 0 }
     post:
       tags: [variants]
       operationId: regenerateDomainVariants
@@ -642,6 +1057,8 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "501": { $ref: "#/components/responses/NotImplementedYet" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/backfill:
     parameters:
@@ -651,43 +1068,144 @@ paths:
       operationId: queueDomainBackfill
       summary: Re-queue a domain's SSLMate historical walk
       description: |
-        Re-triggers the one-time bounded backfill (DESIGN G-02) main.go
-        already queues for every configured domain at boot. Useful to
-        re-pull a domain's history on demand — e.g. after a config
-        change — without restarting the process. Not incremental: there
-        is no persisted cursor between runs, so this repeats the full
-        history query for the domain against SSLMate's issuances API.
+        Re-triggers the bounded backfill (DESIGN G-02) for one domain —
+        useful after a config change, without restarting the process.
+
+        This writes the durable job row, so the result is observable:
+        the response body is the queued job at `state: pending`, and
+        polling `GET /api/v1/domains/{id}/backfill` (or
+        `GET /api/v1/backfill`) follows it to `running` and then `done`.
+
+        A re-queue restarts the walk rather than resuming it: the paging
+        cursor and attempt counter are cleared, because asking for a
+        re-walk means the domain's whole history. Resuming a partially
+        completed walk is what a lease reclaim does after an ungraceful
+        shutdown, and it does not go through this route.
+
         Returns immediately; matching observations flow through the
         normal ingestion pipeline as the walk progresses.
       responses:
-        "202": { description: Backfill queued }
+        "202":
+          description: Backfill queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackfillJob" }
         "404": { $ref: "#/components/responses/NotFound" }
         "501": { $ref: "#/components/responses/NotImplementedYet" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    get:
+      tags: [domains, ops]
+      operationId: getDomainBackfill
+      summary: One domain's backfill job and run history
+      description: |
+        `current` is the live job (pending, running or deferred) or null
+        when no walk is scheduled. `history` is every run for this domain,
+        newest first, including `current`.
+
+        History exists because a single status field could never answer
+        "has this ever worked, and when did it stop working" — the
+        question an operator actually has when a walk looks stuck.
+
+        Unpaginated and capped, the same as GET /allowlist and
+        GET /plugins: one domain's walk history is small and code-bounded,
+        not an unbounded operational log.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  current:
+                    oneOf:
+                      - $ref: "#/components/schemas/BackfillJob"
+                      - type: "null"
+                  history:
+                    type: array
+                    items: { $ref: "#/components/schemas/BackfillJob" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/backfill:
     get:
       tags: [domains, ops]
       operationId: getBackfillStatus
-      summary: SSLMate backfill status and rate-limit state, across every watched domain
+      summary: SSLMate backfill state and progress, across every watched domain
       description: |
-        SSLMate's rate limit is otherwise invisible to an operator: a
-        rate-limited domain's only trace is a transient `last_error` on
-        `GET /plugins/sslmate-backfill`, overwritten the moment any other
-        domain's walk fails or succeeds next. This is the "am I currently
-        being rate limited, which domains, and when do they retry" answer,
-        in one request.
+        Every watched domain's historical walk, in one request: what state
+        it is in, how far along it is, and when it next runs.
 
-        `status: deferred` is a domain currently rate-limited (or otherwise
-        deferred after a transient failure) — `backfill_resume_at` is when
-        `internal/backfillsched` will retry it. A domain with no history yet
-        renders as `status: pending` with both timestamps null, whether or
-        not a walk has ever actually been attempted for it.
+        Progress is the point. The SSLMate plugin's own aggregate health
+        (`GET /plugins/sslmate-backfill`) cannot distinguish a multi-page
+        walk in progress from a hung process, and a rate-limited domain's
+        only other trace there is a transient `last_error` overwritten the
+        moment any other domain fails or succeeds. Each row here carries
+        `pages_done`, `issuances_seen`, `certs_emitted` and the paging
+        cursor, so a walk that is working looks different from one that is
+        not.
+
+        States: `running` is being walked right now (`owner` holds the
+        lease); `deferred` is rate-limited or backing off after a transient
+        failure, with `next_run_at` giving the retry time; `failed` has
+        stopped retrying and needs a human; `pending` is queued, and with a
+        non-zero `pages_done` is a partially-completed walk waiting to
+        resume from `after_cursor`. A domain with no job row yet renders as
+        `pending` with zeroed counters.
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BackfillStatus" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/scan:
+    get:
+      tags: [variants, ops]
+      operationId: getScanStatus
+      summary: Variant scanning state — the DNS sweep and the RDAP rotation
+      description: |
+        Both halves of variant tracking in one request: how much of the
+        generated lookalike set has been probed by DNS, how much has been
+        verified against RDAP, how much of each is backlog right now, and the
+        same three answers again per watched domain.
+
+        **The two halves are reported separately on purpose.** They run on
+        two different clocks against two different third parties and they
+        stall independently — a resolver outage stops DNS while the RDAP
+        rotation keeps turning, and a registry answering `429` stops RDAP
+        while every name keeps being probed. A single blended "scan progress"
+        figure would hide whichever one had stopped, which is the only thing
+        this route exists to reveal.
+
+        **`due_now` is the number that matters.** `last_scanned_at` alone
+        cannot tell an idle sweep from a stuck one: both look stale. A stale
+        timestamp with `due_now: 0` means there is nothing to do; the same
+        timestamp with a large `due_now` means work is queued and not moving,
+        and `enabled` says whether that is a switch somebody turned off.
+
+        Scoped to *active* variant sets belonging to live watched domains,
+        exactly as `GET /api/v1/variants` is (DESIGN G-10) — a deactivated set
+        holds the names a regeneration carried forward, and counting it would
+        inflate both halves of every ratio here. The fleet-wide `dns` and
+        `rdap` objects are the arithmetic sum of the `domains` rows, so the
+        headline and the table can never disagree.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScanStatus" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/variant-sets:
     parameters:
@@ -721,6 +1239,9 @@ paths:
                   next_cursor: { type: "null" }
                   next: { type: "null" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/variant-sets/{id}:
     parameters:
@@ -741,14 +1262,16 @@ paths:
               schema: { $ref: "#/components/schemas/VariantSet" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/variant-sets/{id}/variants:
     parameters:
       - $ref: "#/components/parameters/Id"
-      - { name: cursor, in: query, schema: { type: string } }
-      - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
-      - { name: algorithm, in: query, schema: { type: string } }
-      - { name: tld, in: query, schema: { type: string } }
+      - { name: cursor, in: query, schema: { type: integer, format: int64 } }
+      - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+      - { name: algorithm, in: query, schema: { type: string, pattern: "^[^\\u0000]*$" } }
+      - { name: tld, in: query, schema: { type: string, pattern: "^[^\\u0000]*$" } }
       - name: registration
         in: query
         description: RDAP's verdict. `unknown` means no RDAP answer is available for the name, which is not the same as unregistered.
@@ -756,11 +1279,56 @@ paths:
       - name: registered
         in: query
         description: Boolean shorthand for `registration` — true selects `registered`, false selects `unregistered`. `registration` wins if both are given.
-        schema: { type: boolean }
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: q
+        in: query
+        description: Case-insensitive substring of the lookalike's own fqdn.
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
+      - name: ns_resolves
+        in: query
+        description: Whether the name has nameservers delegated. Omit to not filter on it — `false` is a real answer, not the absence of one.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: resolves
+        in: query
+        description: Whether the name has an A or AAAA record. Omit to not filter on it — `false` is a real answer, not the absence of one.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
+      - name: has_mx
+        in: query
+        description: |
+          Whether the name publishes any MX host. Omit to not filter on it —
+          `false` is a real answer ("probed, takes no mail"), and it also
+          covers a variant nothing has scanned since the field existed, so
+          the two values partition the set.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean }
+            - { type: string, maxLength: 0 }
       - name: page
         in: query
         description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
-        schema: { type: integer, minimum: 1, maximum: 2147483647 }
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The integer form is what a caller sends.
+          anyOf:
+            - { type: integer, minimum: 1, maximum: 2147483647 }
+            - { type: string, maxLength: 0 }
     get:
       tags: [variants]
       operationId: listVariantSetVariants
@@ -775,17 +1343,11 @@ paths:
           description: OK
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  variants: { type: array, items: { $ref: "#/components/schemas/Variant" } }
-                  next_cursor: { type: [string, "null"] }
-                  next: { type: [string, "null"] }
-                  total:
-                    type: integer
-                    description: Row count matching the current filters, independent of cursor/limit/page.
+              schema: { $ref: "#/components/schemas/VariantListResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/matches:
     parameters:
@@ -793,12 +1355,22 @@ paths:
       - name: cursor
         in: query
         description: The `id` of the last item on the previous page (from `next_cursor`).
-        schema: { type: integer }
-      - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The integer form is what a caller sends.
+          anyOf:
+            - { type: integer, format: int64, minimum: -9223372036854775808, maximum: 9223372036854775807 }
+            - { type: string, maxLength: 0 }
+      - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
       - name: page
         in: query
         description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
-        schema: { type: integer, minimum: 1, maximum: 2147483647 }
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The integer form is what a caller sends.
+          anyOf:
+            - { type: integer, minimum: 1, maximum: 2147483647 }
+            - { type: string, maxLength: 0 }
       - name: order
         in: query
         description: Sort direction on `id` (insertion order). Defaults to newest first.
@@ -808,80 +1380,203 @@ paths:
         description: |
           Collapse a precertificate/final-certificate pair — same
           `certificate.tbs_sha256`, same watched domain, same matched name —
-          down to the first one in the current page's sort order. Off by
-          default, so both sibling rows are visible. Applied after `total`
-          and pagination are computed from the unmerged rows, so a merged
-          page can come back with fewer than `limit` entries — nothing is
-          skipped or repeated on the next page.
-        schema: { type: boolean, default: false }
+          down to the first one in the sort order. Off by default, so both
+          sibling rows are visible. Applied to every row the filters match
+          *before* the page is cut, so a merged page still holds up to
+          `limit` rendered rows and `total_merged` is the count to paginate
+          on; `total` keeps counting raw, unmerged rows.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean, default: false }
+            - { type: string, maxLength: 0 }
+      - name: collapse_cert_sans
+        in: query
+        description: |
+          Collapse multiple matches produced by different SANs on the
+          literal same certificate — same `certificate.sha256`, same watched
+          domain, same `match_type`, same variant (nil for exact matches) —
+          down to the first one in the current page's sort order. The full
+          SAN list stays available on the surviving row via
+          `certificate.dns_names`. On by default, unlike `merge_tbs_sha256`
+          — one certificate legitimately matching several SANs under the
+          same watched domain is the common case, and per-SAN detail is
+          rarely wanted collapsed away. Set to `false` to see one row per
+          matched SAN. Composes with `merge_tbs_sha256`: `merge_tbs_sha256`
+          is applied first, then `collapse_cert_sans`. Both are applied
+          before the page is cut, same as `merge_tbs_sha256` — a collapsed
+          page holds up to `limit` rendered rows, and `total_merged` is the
+          count that matches those rows.
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The boolean form is what a caller sends.
+          anyOf:
+            - { type: boolean, default: true }
+            - { type: string, maxLength: 0 }
       - name: match_type
         in: query
         schema: { type: string, enum: [exact, variant] }
       - name: severity
         in: query
         description: One or more of suppressed, info, medium, high, critical — comma-separated.
-        schema: { type: string }
+        style: form
+        explode: false
+        schema:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [suppressed, info, medium, high, critical] }
       - { name: issuer_expected, in: query, schema: { type: boolean } }
       - { name: acknowledged, in: query, schema: { type: boolean } }
       - name: matched_name
         in: query
         description: Substring match (case-insensitive) against the observed SAN.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
       - name: acknowledged_by
         in: query
         description: Substring match (case-insensitive).
-        schema: { type: string }
-      - { name: risk_score_min, in: query, schema: { type: integer } }
-      - { name: risk_score_max, in: query, schema: { type: integer } }
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
+      - name: risk_score_min
+        in: query
+        schema:
+          # An empty value means "no filter"; the bounds are
+          # strconv.ParseInt's, which is what reads this.
+          anyOf:
+            - { type: integer, minimum: -9223372036854775808, maximum: 9223372036854775807 }
+            - { type: string, maxLength: 0 }
+      - name: risk_score_max
+        in: query
+        schema:
+          # An empty value means "no filter"; the bounds are
+          # strconv.ParseInt's, which is what reads this.
+          anyOf:
+            - { type: integer, minimum: -9223372036854775808, maximum: 9223372036854775807 }
+            - { type: string, maxLength: 0 }
       - name: created_after
         in: query
         description: Inclusive lower bound on `created_at`, RFC 3339.
-        schema: { type: string, format: date-time }
+        schema:
+          type: string
+          # An empty value means "no filter", which is how every
+          # other optional parameter here reads it — so the empty
+          # string has to be as legal as a timestamp.
+          anyOf:
+            - { format: date-time }
+            - { maxLength: 0 }
       - name: created_before
         in: query
         description: Inclusive upper bound on `created_at`, RFC 3339.
-        schema: { type: string, format: date-time }
+        schema:
+          type: string
+          # An empty value means "no filter", which is how every
+          # other optional parameter here reads it — so the empty
+          # string has to be as legal as a timestamp.
+          anyOf:
+            - { format: date-time }
+            - { maxLength: 0 }
+      - name: ca
+        in: query
+        description: |
+          Restrict to certificates issued by one CA, named by the CAA issue
+          hostname it publishes — `letsencrypt.org`, `digicert.com` — which is
+          what a CAA record carries and what GET /cas lists, so an operator can
+          go straight from an identifier they authorized to what has actually
+          been issued under it.
+
+          The identifier is resolved to that CA's issuer patterns (its canonical
+          name and every alias) and each is matched case-insensitively as a
+          substring against **both** `issuer_dn` and `issuer_org` — the same test
+          `expected_issuers` gets when the pipeline decides `issuer_expected`.
+          The patterns are OR'd with each other and the group AND's with the rest
+          of the filter, so `ca=digicert.com` also returns certificates whose
+          issuer says GeoTrust, Thawte, RapidSSL or VeriSign, and where two CAs
+          share an identifier (ZeroSSL issues through Sectigo, so both publish
+          `sectigo.com`) both brands are returned.
+
+          An identifier with no issuer patterns is a **400**, never an empty
+          page: the CCADB-mirrored and operator entries in the catalog carry an
+          `owner` label that makes no claim about what appears in an issuer DN,
+          so there is nothing honest to match on, and a zero-row response would
+          read as "this CA has issued nothing". GET /cas exposes
+          `issuer_patterns` per entry so a client can tell which identifiers are
+          filterable before sending the request.
+        schema:
+          type: string
+          # Exactly the distinct IssueHostname values in internal/caa.KnownCAs
+          # — anything else has no issuer patterns to filter on and is a 400.
+          # TestCAFilterEnumMatchesCuratedCatalog keeps the two in step.
+          enum: [actalis.it, amazontrust.com, buypass.com, certum.pl, digicert.com,
+                 entrust.net, globalsign.com, godaddy.com, harica.gr, identrust.com,
+                 letsencrypt.org, pki.goog, sectigo.com, ssl.com, trustasia.com]
       - name: issuer_org
         in: query
         description: Substring match (case-insensitive) against the certificate's issuer organization.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
       - name: issuer_dn
         in: query
         description: Substring match (case-insensitive) against the certificate's issuer DN.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
       - name: subject_dn
         in: query
         description: Substring match (case-insensitive) against the certificate's subject DN.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
       - name: serial_hex
         in: query
         description: Substring match (case-insensitive) against the certificate's serial number.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
       - name: sha256
         in: query
-        description: Exact match, 64 lowercase hex characters.
-        schema: { type: string }
+        description: Exact match, 64 hex characters (either case).
+        schema: { type: string, pattern: "^$|^[0-9a-fA-F]{64}$" }
       - name: dns_name
         in: query
         description: Exact match against one of the certificate's SANs.
-        schema: { type: string }
+        schema: { type: string, pattern: "^[^\\u0000]*$" }
       - { name: is_precert, in: query, schema: { type: boolean } }
       - name: issued_after
         in: query
         description: Inclusive lower bound on the certificate's `not_before`, RFC 3339.
-        schema: { type: string, format: date-time }
+        schema:
+          type: string
+          # An empty value means "no filter", which is how every
+          # other optional parameter here reads it — so the empty
+          # string has to be as legal as a timestamp.
+          anyOf:
+            - { format: date-time }
+            - { maxLength: 0 }
       - name: issued_before
         in: query
         description: Inclusive upper bound on the certificate's `not_before`, RFC 3339.
-        schema: { type: string, format: date-time }
+        schema:
+          type: string
+          # An empty value means "no filter", which is how every
+          # other optional parameter here reads it — so the empty
+          # string has to be as legal as a timestamp.
+          anyOf:
+            - { format: date-time }
+            - { maxLength: 0 }
       - name: expires_after
         in: query
         description: Inclusive lower bound on the certificate's `not_after`, RFC 3339.
-        schema: { type: string, format: date-time }
+        schema:
+          type: string
+          # An empty value means "no filter", which is how every
+          # other optional parameter here reads it — so the empty
+          # string has to be as legal as a timestamp.
+          anyOf:
+            - { format: date-time }
+            - { maxLength: 0 }
       - name: expires_before
         in: query
         description: Inclusive upper bound on the certificate's `not_after`, RFC 3339.
-        schema: { type: string, format: date-time }
+        schema:
+          type: string
+          # An empty value means "no filter", which is how every
+          # other optional parameter here reads it — so the empty
+          # string has to be as legal as a timestamp.
+          anyOf:
+            - { format: date-time }
+            - { maxLength: 0 }
       - name: max_validity_days
         in: query
         description: |
@@ -889,7 +1584,12 @@ paths:
           `not_before`) exceeds this many days — a policy-violation filter
           independent of any one domain's configured
           `expected_issuers`/`max_validity_days`. Must be a positive integer.
-        schema: { type: integer, minimum: 1 }
+        schema:
+          # An empty value means "no filter" — see the note on the
+          # date filters. The integer form is what a caller sends.
+          anyOf:
+            - { type: integer, minimum: 1, maximum: 9223372036854775807 }
+            - { type: string, maxLength: 0 }
     get:
       tags: [domains, findings]
       operationId: listDomainMatches
@@ -927,24 +1627,30 @@ paths:
                     type: integer
                     description: |
                       Row count matching the current filters, independent of
-                      cursor/limit/page and of merge_tbs_sha256 — this always
-                      counts raw match rows, even when the page above was
-                      merged for display. Because of that, a pager computed
-                      as `ceil(total / limit)` can look like it's missing
-                      rows once a page is merged: use total_merged instead
-                      when merge_tbs_sha256=true.
+                      cursor/limit/page and of merge_tbs_sha256/
+                      collapse_cert_sans — this always counts raw match
+                      rows, even when the list above was collapsed for
+                      display. A pager computed as `ceil(total / limit)`
+                      therefore over-counts the pages that exist once a
+                      collapse is in effect (the common case, since
+                      collapse_cert_sans defaults to true): use total_merged
+                      instead whenever either collapse is on.
                   total_merged:
                     type: integer
                     description: |
-                      Present only when merge_tbs_sha256=true: the row count
-                      after collapsing precert/final pairs the same way the
-                      `matches` array above was collapsed — computed across
-                      every matching row, not just this page, so
-                      `ceil(total_merged / limit)` is safe to use as the
-                      merged page count the way `total` is for an unmerged
-                      one.
+                      Present whenever collapse_cert_sans and/or
+                      merge_tbs_sha256 is in effect — which is by default,
+                      since collapse_cert_sans defaults to true: the row
+                      count after collapsing, computed across every matching
+                      row rather than just this page. The collapse runs
+                      before the page is cut, so this is the count the pages
+                      are cut from: `ceil(total_merged / limit)` is the page
+                      count to render, and each page holds up to `limit`
+                      rows the way an uncollapsed one does.
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/domains/{id}/matches/rescore:
     parameters:
@@ -973,6 +1679,9 @@ paths:
                 properties:
                   rescored: { type: integer, description: "Exact matches processed on this domain." }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/matches:
     get:
@@ -990,16 +1699,26 @@ paths:
         - name: domain
           in: query
           description: Exact match against a watched domain's name.
-          schema: { type: string }
+          schema: { type: string, pattern: "^[^\\u0000]*$" }
         - name: cursor
           in: query
           description: The `id` of the last item on the previous page (from `next_cursor`).
-          schema: { type: integer }
-        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The integer form is what a caller sends.
+            anyOf:
+              - { type: integer, format: int64, minimum: -9223372036854775808, maximum: 9223372036854775807 }
+              - { type: string, maxLength: 0 }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
         - name: page
           in: query
           description: 1-based page number — an offset-based alternative to cursor. Wins over cursor if both are supplied. See total.
-          schema: { type: integer, minimum: 1, maximum: 2147483647 }
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The integer form is what a caller sends.
+            anyOf:
+              - { type: integer, minimum: 1, maximum: 2147483647 }
+              - { type: string, maxLength: 0 }
         - name: order
           in: query
           description: Sort direction on `id` (insertion order). Defaults to newest first.
@@ -1009,80 +1728,199 @@ paths:
           description: |
             Collapse a precertificate/final-certificate pair — same
             `certificate.tbs_sha256`, same watched domain, same matched name —
-            down to the first one in the current page's sort order. Off by
-            default, so both sibling rows are visible. Applied after `total`
-            and pagination are computed from the unmerged rows, so a merged
-            page can come back with fewer than `limit` entries — nothing is
-            skipped or repeated on the next page.
-          schema: { type: boolean, default: false }
+            down to the first one in the sort order. Off by default, so both
+            sibling rows are visible. Applied to every row the filters match
+            *before* the page is cut — see GET /domains/{id}/matches'
+            merge_tbs_sha256.
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The boolean form is what a caller sends.
+            anyOf:
+              - { type: boolean, default: false }
+              - { type: string, maxLength: 0 }
+        - name: collapse_cert_sans
+          in: query
+          description: |
+            Collapse multiple matches produced by different SANs on the
+            literal same certificate — same `certificate.sha256`, same
+            watched domain, same `match_type`, same variant (nil for exact
+            matches) — down to the first one in the current page's sort
+            order. The full SAN list stays available on the surviving row
+            via `certificate.dns_names`. On by default — see
+            GET /domains/{id}/matches' collapse_cert_sans. Set to `false` to
+            see one row per matched SAN. Composes with `merge_tbs_sha256`:
+            `merge_tbs_sha256` is applied first, then `collapse_cert_sans`,
+            both before the page is cut — see GET /domains/{id}/matches'
+            collapse_cert_sans.
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The boolean form is what a caller sends.
+            anyOf:
+              - { type: boolean, default: true }
+              - { type: string, maxLength: 0 }
         - name: match_type
           in: query
           schema: { type: string, enum: [exact, variant] }
         - name: severity
           in: query
           description: One or more of suppressed, info, medium, high, critical — comma-separated.
-          schema: { type: string }
+          style: form
+          explode: false
+          schema:
+            type: array
+            minItems: 1
+            items: { type: string, enum: [suppressed, info, medium, high, critical] }
         - { name: issuer_expected, in: query, schema: { type: boolean } }
         - { name: acknowledged, in: query, schema: { type: boolean } }
         - name: matched_name
           in: query
           description: Substring match (case-insensitive) against the observed SAN.
-          schema: { type: string }
+          schema: { type: string, pattern: "^[^\\u0000]*$" }
         - name: acknowledged_by
           in: query
           description: Substring match (case-insensitive).
-          schema: { type: string }
-        - { name: risk_score_min, in: query, schema: { type: integer } }
-        - { name: risk_score_max, in: query, schema: { type: integer } }
+          schema: { type: string, pattern: "^[^\\u0000]*$" }
+        - name: risk_score_min
+          in: query
+          schema:
+            # An empty value means "no filter"; the bounds are
+            # strconv.ParseInt's, which is what reads this.
+            anyOf:
+              - { type: integer, minimum: -9223372036854775808, maximum: 9223372036854775807 }
+              - { type: string, maxLength: 0 }
+        - name: risk_score_max
+          in: query
+          schema:
+            # An empty value means "no filter"; the bounds are
+            # strconv.ParseInt's, which is what reads this.
+            anyOf:
+              - { type: integer, minimum: -9223372036854775808, maximum: 9223372036854775807 }
+              - { type: string, maxLength: 0 }
         - name: created_after
           in: query
           description: Inclusive lower bound on `created_at`, RFC 3339.
-          schema: { type: string, format: date-time }
+          schema:
+            type: string
+            # An empty value means "no filter", which is how every
+            # other optional parameter here reads it — so the empty
+            # string has to be as legal as a timestamp.
+            anyOf:
+              - { format: date-time }
+              - { maxLength: 0 }
         - name: created_before
           in: query
           description: Inclusive upper bound on `created_at`, RFC 3339.
-          schema: { type: string, format: date-time }
+          schema:
+            type: string
+            # An empty value means "no filter", which is how every
+            # other optional parameter here reads it — so the empty
+            # string has to be as legal as a timestamp.
+            anyOf:
+              - { format: date-time }
+              - { maxLength: 0 }
+        - name: ca
+          in: query
+          description: |
+            Restrict to certificates issued by one CA, named by the CAA issue
+            hostname it publishes — `letsencrypt.org`, `digicert.com` — which is
+            what a CAA record carries and what GET /cas lists, so an operator can
+            go straight from an identifier they authorized to what has actually
+            been issued under it.
+
+            The identifier is resolved to that CA's issuer patterns (its canonical
+            name and every alias) and each is matched case-insensitively as a
+            substring against **both** `issuer_dn` and `issuer_org` — the same test
+            `expected_issuers` gets when the pipeline decides `issuer_expected`.
+            The patterns are OR'd with each other and the group AND's with the rest
+            of the filter, so `ca=digicert.com` also returns certificates whose
+            issuer says GeoTrust, Thawte, RapidSSL or VeriSign, and where two CAs
+            share an identifier (ZeroSSL issues through Sectigo, so both publish
+            `sectigo.com`) both brands are returned.
+
+            An identifier with no issuer patterns is a **400**, never an empty
+            page: the CCADB-mirrored and operator entries in the catalog carry an
+            `owner` label that makes no claim about what appears in an issuer DN,
+            so there is nothing honest to match on, and a zero-row response would
+            read as "this CA has issued nothing". GET /cas exposes
+            `issuer_patterns` per entry so a client can tell which identifiers are
+            filterable before sending the request.
+          schema:
+            type: string
+            # Exactly the distinct IssueHostname values in internal/caa.KnownCAs
+            # — anything else has no issuer patterns to filter on and is a 400.
+            # TestCAFilterEnumMatchesCuratedCatalog keeps the two in step.
+            enum: [actalis.it, amazontrust.com, buypass.com, certum.pl, digicert.com,
+                   entrust.net, globalsign.com, godaddy.com, harica.gr, identrust.com,
+                   letsencrypt.org, pki.goog, sectigo.com, ssl.com, trustasia.com]
         - name: issuer_org
           in: query
           description: Substring match (case-insensitive) against the certificate's issuer organization.
-          schema: { type: string }
+          schema: { type: string, pattern: "^[^\\u0000]*$" }
         - name: issuer_dn
           in: query
           description: Substring match (case-insensitive) against the certificate's issuer DN.
-          schema: { type: string }
+          schema: { type: string, pattern: "^[^\\u0000]*$" }
         - name: subject_dn
           in: query
           description: Substring match (case-insensitive) against the certificate's subject DN.
-          schema: { type: string }
+          schema: { type: string, pattern: "^[^\\u0000]*$" }
         - name: serial_hex
           in: query
           description: Substring match (case-insensitive) against the certificate's serial number.
-          schema: { type: string }
+          schema: { type: string, pattern: "^[^\\u0000]*$" }
         - name: sha256
           in: query
-          description: Exact match, 64 lowercase hex characters.
-          schema: { type: string }
+          description: Exact match, 64 hex characters (either case).
+          schema: { type: string, pattern: "^$|^[0-9a-fA-F]{64}$" }
         - name: dns_name
           in: query
           description: Exact match against one of the certificate's SANs.
-          schema: { type: string }
+          schema: { type: string, pattern: "^[^\\u0000]*$" }
         - { name: is_precert, in: query, schema: { type: boolean } }
         - name: issued_after
           in: query
           description: Inclusive lower bound on the certificate's `not_before`, RFC 3339.
-          schema: { type: string, format: date-time }
+          schema:
+            type: string
+            # An empty value means "no filter", which is how every
+            # other optional parameter here reads it — so the empty
+            # string has to be as legal as a timestamp.
+            anyOf:
+              - { format: date-time }
+              - { maxLength: 0 }
         - name: issued_before
           in: query
           description: Inclusive upper bound on the certificate's `not_before`, RFC 3339.
-          schema: { type: string, format: date-time }
+          schema:
+            type: string
+            # An empty value means "no filter", which is how every
+            # other optional parameter here reads it — so the empty
+            # string has to be as legal as a timestamp.
+            anyOf:
+              - { format: date-time }
+              - { maxLength: 0 }
         - name: expires_after
           in: query
           description: Inclusive lower bound on the certificate's `not_after`, RFC 3339.
-          schema: { type: string, format: date-time }
+          schema:
+            type: string
+            # An empty value means "no filter", which is how every
+            # other optional parameter here reads it — so the empty
+            # string has to be as legal as a timestamp.
+            anyOf:
+              - { format: date-time }
+              - { maxLength: 0 }
         - name: expires_before
           in: query
           description: Inclusive upper bound on the certificate's `not_after`, RFC 3339.
-          schema: { type: string, format: date-time }
+          schema:
+            type: string
+            # An empty value means "no filter", which is how every
+            # other optional parameter here reads it — so the empty
+            # string has to be as legal as a timestamp.
+            anyOf:
+              - { format: date-time }
+              - { maxLength: 0 }
         - name: max_validity_days
           in: query
           description: |
@@ -1091,7 +1929,12 @@ paths:
             independent of any one domain's configured
             `expected_issuers`/`max_validity_days`. Must be a positive
             integer.
-          schema: { type: integer, minimum: 1 }
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The integer form is what a caller sends.
+            anyOf:
+              - { type: integer, minimum: 1, maximum: 9223372036854775807 }
+              - { type: string, maxLength: 0 }
       responses:
         "200":
           description: OK
@@ -1109,18 +1952,18 @@ paths:
                     type: integer
                     description: |
                       Row count matching the current filters, independent of
-                      cursor/limit/page and of merge_tbs_sha256 — this always
-                      counts raw match rows, even when the page above was
-                      merged for display. Because of that, a pager computed
-                      as `ceil(total / limit)` can look like it's missing
-                      rows once a page is merged: use total_merged instead
-                      when merge_tbs_sha256=true.
+                      cursor/limit/page and of merge_tbs_sha256/
+                      collapse_cert_sans — see GET /domains/{id}/matches'
+                      total.
                   total_merged:
                     type: integer
                     description: |
-                      Present only when merge_tbs_sha256=true — see
-                      GET /domains/{id}/matches' total_merged.
+                      Present whenever collapse_cert_sans and/or
+                      merge_tbs_sha256 collapsed the page — which is by
+                      default — see GET /domains/{id}/matches' total_merged.
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/matches/{id}:
     parameters:
@@ -1137,6 +1980,8 @@ paths:
               schema: { $ref: "#/components/schemas/Match" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/matches/{id}/rescore:
     parameters:
@@ -1161,6 +2006,8 @@ paths:
               schema: { $ref: "#/components/schemas/Match" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/matches/{id}/acknowledge:
     parameters:
@@ -1179,6 +2026,8 @@ paths:
         "204": { description: Acknowledged }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/matches/stream:
     get:
@@ -1214,6 +2063,9 @@ paths:
             text/event-stream:
               schema: { $ref: "#/components/schemas/Match" }
         "501": { $ref: "#/components/responses/NotImplementedYet" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/allowlist:
     get:
@@ -1238,6 +2090,9 @@ paths:
                     items: { $ref: "#/components/schemas/AllowlistEntry" }
                   next_cursor: { type: "null" }
                   next: { type: "null" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     post:
       tags: [allowlist]
       operationId: createAllowlistEntry
@@ -1255,6 +2110,8 @@ paths:
               schema: { $ref: "#/components/schemas/AllowlistEntry" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "409": { $ref: "#/components/responses/Conflict" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/allowlist/{id}:
     parameters:
@@ -1272,6 +2129,8 @@ paths:
               schema: { $ref: "#/components/schemas/AllowlistEntry" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     delete:
       tags: [allowlist]
       operationId: deleteAllowlistEntry
@@ -1280,6 +2139,9 @@ paths:
       responses:
         "204": { description: No Content }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/notification-channels:
     get:
@@ -1303,6 +2165,9 @@ paths:
                     items: { $ref: "#/components/schemas/NotificationChannel" }
                   next_cursor: { type: "null" }
                   next: { type: "null" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     post:
       tags: [notifications]
       operationId: createNotificationChannel
@@ -1337,6 +2202,8 @@ paths:
         "501": { $ref: "#/components/responses/NotImplementedYet" }
         "502": { $ref: "#/components/responses/NotificationChannelTestFailed" }
         "503": { $ref: "#/components/responses/EncryptionKeyNotConfigured" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/notification-channels/{id}:
     parameters:
@@ -1354,6 +2221,8 @@ paths:
               schema: { $ref: "#/components/schemas/NotificationChannel" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     patch:
       tags: [notifications]
       operationId: updateNotificationChannel
@@ -1385,6 +2254,8 @@ paths:
         "501": { $ref: "#/components/responses/NotImplementedYet" }
         "502": { $ref: "#/components/responses/NotificationChannelTestFailed" }
         "503": { $ref: "#/components/responses/EncryptionKeyNotConfigured" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     delete:
       tags: [notifications]
       operationId: deleteNotificationChannel
@@ -1393,6 +2264,9 @@ paths:
       responses:
         "204": { description: No Content }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/settings/notifications:
     get:
@@ -1408,6 +2282,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/NotificationSettings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     put:
       tags: [notifications]
       operationId: replaceNotificationSettings
@@ -1425,6 +2302,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/NotificationSettings" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/plugins:
     get:
@@ -1448,6 +2327,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PluginStatus" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/plugins/{id}:
     parameters:
@@ -1468,6 +2350,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PluginDetail" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/plugins/{id}/logs/{logId}:
     parameters:
@@ -1497,6 +2382,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PluginLogDetail" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/plugins/{id}/config:
     parameters:
@@ -1525,6 +2413,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PluginConfig" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     put:
       tags: [ops]
       operationId: replacePluginConfig
@@ -1553,6 +2444,8 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/config:
     get:
@@ -1565,6 +2458,9 @@ paths:
           content:
             application/json:
               schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/summary:
     get:
@@ -1584,7 +2480,10 @@ paths:
       parameters:
         - name: window
           in: query
-          schema: { type: string, default: "24h" }
+          schema:
+            type: string
+            default: "24h"
+            pattern: "^$|^0*[1-9][0-9]{0,5}(ns|us|ms|s|m|h)([0-9]{1,6}(ns|us|ms|s|m|h))?$"
           description: Go duration string bounding the windowed counts.
       responses:
         "200":
@@ -1593,6 +2492,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Summary" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/search:
     get:
@@ -1622,11 +2523,16 @@ paths:
           in: query
           required: true
           description: Search term. Matched case-insensitively as a substring in every category.
-          schema: { type: string, minLength: 1 }
+          schema: { type: string, minLength: 1, pattern: "^[^\\u0000]*[^\\u0000\\s][^\\u0000]*$" }
         - name: limit
           in: query
           description: Maximum results per category.
-          schema: { type: integer, default: 10, maximum: 50 }
+          schema:
+            # An empty value means "no filter" — see the note on the
+            # date filters. The integer form is what a caller sends.
+            anyOf:
+              - { type: integer, minimum: 1, maximum: 50, default: 10 }
+              - { type: string, maxLength: 0 }
       responses:
         "200":
           description: OK
@@ -1634,6 +2540,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/matches/acknowledge:
     post:
@@ -1657,10 +2565,13 @@ paths:
               properties:
                 ids:
                   type: array
-                  items: { type: integer, format: int64 }
+                  # A null element decodes to 0, which the handler then treats
+                  # as "no such match" rather than rejecting — encoding/json
+                  # cannot distinguish it from an absent element.
+                  items: { type: [integer, "null"], format: int64 }
                   minItems: 1
                   maxItems: 500
-                note: { type: string }
+                note: { type: [string, "null"] }
       responses:
         "200":
           description: Outcome per id
@@ -1678,6 +2589,8 @@ paths:
                         id: { type: integer, format: int64 }
                         reason: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/matches/{id}/allowlist:
     parameters:
@@ -1688,11 +2601,25 @@ paths:
       summary: Mark a match as not a threat
       description: |
         The "not a threat" action — the most-used control in the triage
-        screen. For a variant match, allowlists the matched variant's own
-        registrable domain (the eTLD+1 form future matches are actually
-        checked against, not the raw matched certificate SAN); for an exact
-        match, allowlists matched_name directly, which is informational only
-        since exact matches aren't allowlist-checked (DESIGN G-09).
+        screen. Allowlists the DNS name, never the certificate: this match
+        is one sha256, but the name keeps issuing certificates, and a
+        renewal 60 days from now would alert all over again.
+
+        `scope` picks which name, and is the operator's call:
+
+        - `hostname` (default) — the matched SAN, e.g. `login.paypa1.com`.
+          Other hosts under the same lookalike still alert. Too narrow is
+          one more alert to triage; too broad is a phishing host on an
+          already-dismissed lookalike that is never reported, which is why
+          this is the default.
+        - `domain` — the variant's registrable domain, e.g. `paypa1.com`.
+          Same effect as POST /variants/{id}/allowlist.
+
+        For an exact match `scope` is ignored and matched_name is written,
+        which is informational only since exact matches aren't
+        allowlist-checked (DESIGN G-09).
+
+        Already allowlisted is success, not a conflict.
       requestBody:
         content:
           application/json:
@@ -1704,10 +2631,19 @@ paths:
                   description: |
                     Why this is benign. Unexplained allowlist entries are
                     indistinguishable from mistakes six months later.
+                scope:
+                  type: string
+                  enum: [hostname, domain]
+                  default: hostname
+                  description: |
+                    Which name to allowlist — the matched hostname, or the
+                    whole variant registrable domain.
       responses:
         "204": { description: Allowlisted }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/certificates/{sha256}:
     parameters:
@@ -1727,6 +2663,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Certificate" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/certificates/{sha256}/pem:
     parameters:
@@ -1749,6 +2688,9 @@ paths:
             application/x-pem-file:
               schema: { type: string }
         "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/variants/preview:
     post:
@@ -1781,6 +2723,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/notifications/test:
     post:
@@ -1810,6 +2754,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "503": { $ref: "#/components/responses/EncryptionKeyNotConfigured" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/audit:
     get:
@@ -1834,8 +2780,16 @@ paths:
         that gap into a user-visible outage.
       parameters:
         - { name: actor,  in: query, schema: { type: string } }
-        - { name: action, in: query, schema: { type: string } }
-        - { name: since,  in: query, schema: { type: string, format: date-time } }
+        - { name: action, in: query, schema: { type: string, pattern: "^[^\\u0000]*$" } }
+        - name: since
+          in: query
+          schema:
+            type: string
+            # Empty means "no filter" — see the note on the match date
+            # filters below.
+            anyOf:
+              - { format: date-time }
+              - { maxLength: 0 }
         - $ref: "#/components/parameters/Cursor"
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Page"
@@ -1856,6 +2810,8 @@ paths:
                     type: integer
                     description: Row count matching the current filters, independent of cursor/limit/page.
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/auth/config:
     get:
@@ -1901,6 +2857,10 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Principal" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        # No "403": this is the one authenticated route with no RequireScope
+        # (see Routes()) — any valid token may ask who it belongs to, so the
+        # scope check that produces a 403 never runs here.
+        "400": { $ref: "#/components/responses/BadRequest" }
 
 
 components:
@@ -1933,15 +2893,22 @@ components:
     Cursor:
       name: cursor
       in: query
-      schema: { type: string }
+      schema:
+        # An empty value means "no filter" — see the note on the
+        # date filters. The integer form is what a caller sends.
+        anyOf:
+          - { type: integer, format: int64, minimum: -9223372036854775808, maximum: 9223372036854775807 }
+          - { type: string, maxLength: 0 }
       description: |
-        Opaque cursor from a previous response's next_cursor. Cursor rather
-        than offset because rows insert continuously — an offset skips records
-        whenever anything lands between two pages.
+        Opaque cursor from a previous response's next_cursor — today the `id`
+        of the last row on that page, which is why it is an integer here and
+        an opaque string on the variant routes. Cursor rather than offset
+        because rows insert continuously — an offset skips records whenever
+        anything lands between two pages.
     Limit:
       name: limit
       in: query
-      schema: { type: integer, default: 50, maximum: 500 }
+      schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
     Page:
       name: page
       in: query
@@ -1965,9 +2932,24 @@ components:
         No session cookie and no bearer token, or the credential presented is
         invalid or expired. The UI treats this as "show the sign-in screen",
         not as an error to report.
+
+        This is the plain Error envelope, not an RFC 9457 Problem: the
+        authenticator rejects the request before any handler runs, and there
+        is only ever one reason, so there is no cause for a client to branch
+        on. Problem documents are reserved for the conflicts that genuinely
+        have several distinguishable causes — see the Problem schema.
       content:
-        application/problem+json:
-          schema: { $ref: "#/components/schemas/Problem" }
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: |
+        Authenticated, but the token's scopes do not include the one this
+        route requires — read, write or admin, see internal/api.RequireScope.
+        Unlike a 401 this will not be fixed by signing in again; the token
+        itself is too narrow.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     NotFound:
       description: Not found
       content:
@@ -1978,21 +2960,33 @@ components:
         The write conflicts with existing state. Returned as a Problem
         (RFC 9457), not the plain Error every other 4xx here uses — a single
         route can 409 for more than one distinct reason (e.g. purge: "not
-        soft-deleted yet" vs. "still has matches or variant sets"), so
+        soft-deleted yet" vs. "still referenced by something purge cannot
+        clear"), so
         `type` is what a client branches on, never `detail`'s prose. The
         `type` values this API actually issues today:
 
         - `https://merkleye.dev/problems/domain-name-conflict` —
-          POST /domains, POST /domains/{id}/restore: this name is already
-          in use by another live domain.
+          POST /domains: this name is already in use by another live domain,
+          which GET /domains will show you.
+        - `https://merkleye.dev/problems/domain-name-held-by-deleted` —
+          POST /domains: the name belongs to a soft-deleted domain, which
+          holds it until it is restored or purged (uniqueness on the name is
+          unconditional). No default listing shows that domain, so `detail`
+          names its id and both routes out: POST /domains/{id}/restore to
+          bring it back with the matches, variant sets and policies recorded
+          against it, or DELETE /domains/{id}/purge to discard those and then
+          create this domain fresh. GET /domains?status=deleted lists the
+          candidates.
         - `https://merkleye.dev/problems/domain-not-deleted` —
           DELETE /domains/{id}/purge: the domain is still live. Purge is
           only ever the second step of a two-step remove — soft-delete
           (DELETE /domains/{id}) it first.
         - `https://merkleye.dev/problems/domain-still-referenced` —
-          DELETE /domains/{id}/purge: the domain still has matches or
-          variant sets recorded against it. Remove those first, or use
-          DELETE /domains/{id} to soft-delete instead.
+          DELETE /domains/{id}/purge: something still references the domain
+          that the purge cascade does not clear (it does clear matches,
+          alerts, variant sets, variant changes, policies and backfill
+          jobs). Nothing was deleted; use DELETE /domains/{id} to
+          soft-delete instead.
         - `https://merkleye.dev/problems/allowlist-entry-conflict` —
           POST /allowlist: this fqdn is already allowlisted.
         - `https://merkleye.dev/problems/notification-channel-name-conflict`
@@ -2009,6 +3003,13 @@ components:
         - `https://merkleye.dev/problems/plugin-encryption-key-not-configured`
           — PUT /plugins/{id}/config: `auth_token` was set but
           `MERKLEYE_ENCRYPTION_KEY` isn't configured on this deployment.
+        - `https://merkleye.dev/problems/ca-identifier-conflict` —
+          POST /cas: this CAA identifier is already in the catalog, possibly
+          as a CCADB-mirrored entry.
+        - `https://merkleye.dev/problems/ca-system-managed` —
+          DELETE /cas/{id}: the CA is mirrored from CCADB and owned by the
+          catalog sync, which would recreate it. Only CAs added through
+          POST /cas can be deleted.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -2099,7 +3100,14 @@ components:
           properties:
             domains:     { type: integer }
             variants:    { type: integer }
-            allowlisted: { type: integer }
+            allowlisted:
+              type: integer
+              description: |
+                Number of allowlist entries — the rows GET /allowlist
+                returns, and nothing else. Not the matcher's suppression-key
+                count, which also holds every watched domain (auto-allowlisted
+                so we never alert on our own certificates) and would make this
+                tile disagree with the list it links to.
         ingestion:
           type: object
           description: |
@@ -2130,6 +3138,74 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Variant" }
 
+    BackfillJob:
+      type: object
+      description: |
+        One SSLMate historical walk. Durable: the walk survives a restart,
+        resuming from `after_cursor` rather than starting over.
+      properties:
+        id:
+          type: [integer, "null"]
+          format: int64
+          description: |
+            The walk's own id. Null for a domain that has never had one
+            scheduled — GET /backfill renders those as `pending` so the fleet
+            view has a row per domain, and a row with no run behind it has no
+            id to give. Two entries in a domain's history differ by this.
+        domain_id:
+          type: integer
+          format: int64
+          description: |
+            The watched domain this walk belongs to — the same id as
+            GET /domains/{id}, so a job links straight back without a
+            client-side name→id map. Backed by a NOT NULL foreign key, so it
+            always names a domain that exists.
+        domain: { type: string }
+        state:
+          type: string
+          enum: [pending, running, deferred, done, failed]
+          description: |
+            `pending` with a non-zero `pages_done` is a resumable walk that
+            yielded its turn so other domains could run, not one that has
+            not started.
+        trigger:
+          type: string
+          enum: [schedule, manual, onboard]
+          description: |
+            Why this walk exists — the recurrence sweep, an explicit
+            POST /domains/{id}/backfill, or the domain having no walk yet.
+        pages_done:     { type: integer, description: Pages fetched across every attempt at this job. }
+        issuances_seen: { type: integer, description: Issuance rows read from the API, before the expired-certificate filter. }
+        certs_emitted:
+          type: integer
+          description: |
+            Observations pushed into the pipeline. Reported separately from
+            issuances_seen because a domain whose history is entirely
+            expired reads thousands of rows and emits none — without both
+            numbers that is indistinguishable from a stalled walk.
+        attempt:      { type: integer, description: Failed attempts so far. Rate limits do not count. }
+        after_cursor: { type: string, description: "SSLMate's paging cursor: the point a restart resumes from." }
+        owner:        { type: string, description: Process holding the lease while running; empty otherwise. }
+        lease_expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            When an unrefreshed claim lapses and the job becomes
+            reclaimable — how a walk is recovered from a killed process.
+        next_run_at:
+          type: [string, "null"]
+          format: date-time
+          description: When a pending or deferred job becomes claimable. Null on terminal states.
+        last_error:    { type: [string, "null"] }
+        created_at:    { type: string, format: date-time }
+        updated_at:    { type: string, format: date-time, description: Touched on every progress write, so a stalled worker is visible as a stale row. }
+        started_at:    { type: [string, "null"], format: date-time }
+        finished_at:   { type: [string, "null"], format: date-time }
+        backfilled_at:
+          type: [string, "null"]
+          format: date-time
+          description: The domain's last completed walk, and the clock the recurrence interval measures from.
+
     BackfillStatus:
       type: object
       description: The response to GET /api/v1/backfill.
@@ -2140,27 +3216,28 @@ components:
             Mirrors ingest.sslmate_backfill.enabled. False means every row
             below is stale history from a previous run, not something
             currently in progress.
+        interval_seconds:
+          type: integer
+          description: |
+            ingest.sslmate_backfill.interval — how long after a completed
+            walk a domain is walked again. 0 means recurrence is off and a
+            completed domain is never re-walked without a manual trigger.
         queue_length:
           type: integer
-          description: Domains already enqueued, waiting on the single backfill worker.
+          description: |
+            Jobs claimable right now. Read from Postgres, so unlike the
+            in-process queue depth this replaced it survives a restart.
         counts:
           type: object
           properties:
             pending:  { type: integer }
+            running:  { type: integer }
+            deferred: { type: integer, description: Currently rate-limited or backing off. }
             done:     { type: integer }
-            deferred: { type: integer, description: Currently rate-limited or otherwise deferred. }
+            failed:   { type: integer, description: Stopped retrying; needs a human. }
         domains:
           type: array
-          items:
-            type: object
-            properties:
-              domain: { type: string }
-              status: { type: string, enum: [pending, done, deferred] }
-              backfilled_at: { type: [string, "null"], format: date-time }
-              backfill_resume_at:
-                type: [string, "null"]
-                format: date-time
-                description: Set only when status is deferred.
+          items: { $ref: "#/components/schemas/BackfillJob" }
 
     AuditEntry:
       type: object
@@ -2208,10 +3285,20 @@ components:
         domain:
           type: string
           description: A-label form, lowercased, no trailing dot.
-        include_subdomains: { type: boolean }
+        include_subdomains: { type: [boolean, "null"] }
         enabled:
           type: boolean
-          description: A manual pause/resume toggle, independent of deletion — see PATCH /domains/{id}.
+          description: |
+            A manual pause/resume toggle, independent of deletion — see PATCH
+            /domains/{id}.
+
+            A disabled domain is not watched: it leaves the matcher snapshot
+            and the certspotter watchlist, along with every variant generated
+            from it, so no certificate on it produces a match. It stays
+            *allowlisted* while disabled, so disabling a domain can never
+            make it start alerting as some other watched domain's lookalike —
+            disabling is not disowning. Its variant sets, matches and history
+            are untouched, and re-enabling restores the whole set.
         expected_issuers:
           type: array
           items: { type: string }
@@ -2235,17 +3322,19 @@ components:
       properties:
         domain:
           type: string
+          minLength: 1
+          format: idn-hostname
           description: |
             A domain name, in either A-label or Unicode form — normalized to
             A-label on save (the form the matcher requires), with the
             original Unicode form kept for display if the two differ. Must
             not start with `*.`.
         include_subdomains:
-          type: boolean
+          type: [boolean, "null"]
           default: true
         expected_issuers:
           type: array
-          items: { type: string }
+          items: { type: [string, "null"], pattern: "^[^\\u0000]*$" }
           minItems: 1
           description: |
             Required. Without at least one entry, every routine renewal
@@ -2253,23 +3342,42 @@ components:
             `openssl s_client -connect <domain>:443 -servername <domain>
             </dev/null 2>/dev/null | openssl x509 -noout -issuer`
         max_validity_days:
-          type: integer
+          type: [integer, "null"]
+          minimum: 0
+          # The CA/Browser Forum ceiling in force today (internal/cabf,
+          # ballot SC-081). It steps down — 100 on 2027-03-15, 47 on
+          # 2029-03-15 — so this number goes stale on a date rather than on
+          # a commit. TestMaxValidityDaysCeilingMatchesSpec fails the build
+          # on the day it does, which is the only reason it is safe to name
+          # a moving limit here at all.
+          maximum: 200
           default: 0
           description: |
-            0 (default) means unenforced. Otherwise, keep at or below the
-            CA/Browser Forum's current publicly-trusted TLS max validity
-            (Ballot SC-081) — a lower value flags fully compliant
-            certificates as policy violations. That ceiling steps down over
-            time: 398 days before 2026-03-15, 200 days 2026-03-15 through
-            2027-03-14 (current), 100 days 2027-03-15 through 2029-03-14, 47
-            days from 2029-03-15 onward.
+            0 (default) means unenforced. Otherwise it must be at or below
+            the CA/Browser Forum's publicly-trusted TLS maximum validity in
+            effect on the day of the request (Ballot SC-081); a longer value
+            is rejected with 400. That ceiling steps down over time — 398
+            days before 2026-03-15, 200 days from 2026-03-15, 100 days from
+            2027-03-15, 47 days from 2029-03-15 — so a value accepted today
+            can be rejected after the next step lands, with no server
+            upgrade in between.
+
+            The rejection is not pedantry: no publicly-trusted CA will issue
+            a certificate longer than the Forum's ceiling, so a policy above
+            it can never be violated and the domain reads as permanently
+            compliant. A value *below* the ceiling is the useful case, and
+            flags otherwise-compliant certificates as violations by design.
 
     DomainPatch:
       type: object
       description: A null/omitted field is left unchanged.
       properties:
-        include_subdomains: { type: boolean }
-        enabled: { type: boolean }
+        include_subdomains: { type: [boolean, "null"] }
+        enabled:
+          type: [boolean, "null"]
+          description: |
+            Setting this false stops watching the domain and its variants
+            within a second or two — see WatchedDomain.enabled.
 
     IssuerPolicy:
       type: object
@@ -2294,9 +3402,20 @@ components:
       properties:
         expected_issuers:
           type: array
-          items: { type: string }
+          items: { type: [string, "null"], pattern: "^[^\\u0000]*$" }
           minItems: 1
-        max_validity_days: { type: integer, default: 0 }
+        max_validity_days:
+          type: [integer, "null"]
+          minimum: 0
+          # The CA/Browser Forum ceiling in force today (internal/cabf,
+          # ballot SC-081). It steps down — 100 on 2027-03-15, 47 on
+          # 2029-03-15 — so this number goes stale on a date rather than on
+          # a commit. TestMaxValidityDaysCeilingMatchesSpec fails the build
+          # on the day it does, which is the only reason it is safe to name
+          # a moving limit here at all.
+          maximum: 200
+          default: 0
+          description: Same rules and same CA/Browser Forum ceiling as DomainCreate's — see there.
 
     VariantSettings:
       type: object
@@ -2315,9 +3434,18 @@ components:
           type: boolean
           description: |
             Whether the variant scanner refreshes registration and DNS state
-            for active sets. Off by default: this is outbound traffic aimed
-            at attacker-controlled infrastructure and at third-party
-            registries, and some deployments want it proxied or off.
+            for active sets. **On by default**, including on upgrade.
+
+            This is outbound traffic aimed at attacker-controlled
+            infrastructure and at third-party registries, at thousands of
+            names per watched domain — so it is a deliberate choice, not an
+            oversight. Off is not the safer default it looks like: with no
+            scanner, registration and DNS state never fill in, the variant
+            change feed never fires, and the certspotter watchlist cannot
+            narrow to the names somebody actually took, so every generated
+            permutation stays watched. Set it to false here if your
+            deployment wants that traffic proxied or absent; nothing turns it
+            back on afterwards.
         scan_interval_seconds:
           type: integer
           description: How often each variant in an active set gets its DNS probe.
@@ -2350,25 +3478,45 @@ components:
 
     VariantSettingsWrite:
       type: object
-      required: [default_tlds, max_per_domain]
-      description: Replaces the whole record as a unit — same PUT semantics as IssuerPolicyWrite.
+      # max_per_domain only: it decodes to 0 when absent and the handler
+      # rejects that, so it genuinely has to be sent. default_tlds was listed
+      # here too, but omitting it is accepted — the field decodes to a nil
+      # slice and is stored as an empty list, which is also what ADR-0042's
+      # partial writes rely on.
+      required: [max_per_domain]
+      description: |
+        Replaces the generation fields as a unit — same PUT semantics as
+        IssuerPolicyWrite.
+
+        The `scan_*` fields are the exception: an omitted one keeps its
+        current value rather than resetting to zero. They postdate this
+        route's first clients, and a generation-only body was silently
+        setting `scan_enabled` to false and zeroing every tunable, which
+        stops the sweep and parks every variant's `registration` at
+        `unknown`. Send a `scan_*` key only to change it; send `[]` to clear
+        `scan_resolvers`.
       properties:
-        generator_url: { type: string }
+        generator_url:
+          type: [string, "null"]
+          pattern: "^$|^[a-zA-Z][a-zA-Z0-9+.-]*://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~!$&'()*+,;=:@/-]*)?(\\?[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?(#[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?$"
+          description: |
+            Absolute URL of the dnstwist sidecar, or the empty string to
+            disable generation. A relative or host-less URL is a 400.
         default_tlds:
-          type: array
-          items: { type: string }
+          type: [array, "null"]
+          items: { type: [string, "null"], pattern: "^[^\\u0000]*$" }
         default_dictionary:
-          type: array
-          items: { type: string }
-        max_per_domain: { type: integer, minimum: 1 }
-        scan_enabled: { type: boolean }
-        scan_interval_seconds: { type: integer, minimum: 0 }
-        scan_dns_qps: { type: number, minimum: 0 }
-        scan_rdap_qps: { type: number, minimum: 0 }
-        scan_rdap_rotation_days: { type: integer, minimum: 0 }
+          type: [array, "null"]
+          items: { type: [string, "null"], pattern: "^[^\\u0000]*$" }
+        max_per_domain: { type: integer, minimum: 1, maximum: 9223372036854775807 }
+        scan_enabled: { type: [boolean, "null"] }
+        scan_interval_seconds: { type: [integer, "null"], minimum: 0, maximum: 9223372036854775807 }
+        scan_dns_qps: { type: [number, "null"], minimum: 0 }
+        scan_rdap_qps: { type: [number, "null"], minimum: 0 }
+        scan_rdap_rotation_days: { type: [integer, "null"], minimum: 0, maximum: 9223372036854775807 }
         scan_resolvers:
-          type: array
-          items: { type: string }
+          type: [array, "null"]
+          items: { type: [string, "null"], pattern: "^[^\\u0000]*$" }
 
     ScoringSettings:
       type: object
@@ -2453,28 +3601,170 @@ components:
           items: { type: string }
         _self: { type: string }
 
-    KnownCA:
+    CA:
       type: object
+      description: |
+        One entry in the CA catalog. `name` is what a picker shows;
+        `issue_hostname` is what goes in a CAA record and what `cas`/
+        `exclude_cas` resolve against. The two are separate because a CA
+        can be selected by a name that is not its hostname.
       properties:
+        id:
+          type: [integer, "null"]
+          format: int64
+          description: |
+            The stored row's id, for DELETE /api/v1/cas/{id}. Null for
+            `source: curated` entries, which are compiled into the server
+            and have no row to delete.
         name:
           type: string
           description: |
             Canonical name to send back in `cas`/`exclude_cas` — matched the
-            same case-insensitive, substring way as `expected_issuers`.
+            same case-insensitive, substring way as `expected_issuers`. For
+            a stored entry this is the CA owner (CCADB's own naming, or what
+            the admin typed).
+
+            Not unique: a stored entry's name is its `owner`, and one owner
+            publishes many issue hostnames, so several entries repeat one
+            name and differ only in `issue_hostname`. Key a list on `id`
+            (or `issue_hostname` for curated entries, which have none), not
+            on this.
         issue_hostname:
           type: string
           description: The value this CA publishes for a CAA `issue`/`issuewild` record.
+        issuer_patterns:
+          type: array
+          items: { type: string }
+          description: |
+            The case-insensitive substrings that identify this CA in an
+            observed certificate's issuer DN or O — this entry's canonical
+            name plus its aliases, lowercased and deduplicated. These are
+            exactly what GET /matches?ca=<issue_hostname> resolves to.
+
+            Present only for `curated` entries. Absent for `ccadb` and
+            `operator` ones, whose only label is `owner` — free text from
+            CCADB's CA-owner column, a display label that makes no claim
+            about what a certificate's issuer field says. Substituting it
+            would turn a documented non-matcher into a silent one.
+
+            Read absent or empty as **"this identifier is not filterable"**,
+            which is not the same as "this CA has no certificates": omit the
+            link to GET /matches?ca= rather than offering one that 400s.
+            Where two curated entries share an issue hostname, each carries
+            the union of both CAs' patterns.
         notes:
           type: string
           description: A caveat worth surfacing about this CA's identifier, when one exists.
+        source:
+          type: string
+          enum: [curated, ccadb, operator]
+          description: |
+            Where this entry comes from. `curated` is internal/caa.KnownCAs,
+            compiled in and the only source CAA record generation resolves
+            against. `ccadb` is a row mirrored from CCADB's published report.
+            `operator` is a CA an admin added through POST /api/v1/cas.
+        system_managed:
+          type: boolean
+          description: |
+            True for `curated` and `ccadb` entries — the ones no operator can
+            delete. This is the bit a UI branches on to decide whether to
+            offer a delete control; `source` says why.
+        owner:
+          type: string
+          description: |
+            CA owner as CCADB names it, or as the admin typed it. Absent for
+            curated entries, whose `name` already is the owner.
+
+            A display label, not an identity: it repeats once per issue
+            hostname that owner publishes. `Amazon Trust Services` is eight
+            entries in this list (amazon.com, amazonaws.com, amazonaws.eu,
+            amazontrust.com, amazontrustservices.eu, amznts.eu,
+            aws.amazon.com, awstrust.com) and `DigiCert` thirteen. Group by
+            it for display if you like, but do not deduplicate on it — a CA
+            may validate issuance against any of its identifiers, so an
+            operator who only sees one of the eight can write a CAA record
+            that blocks the issuance they meant to allow.
 
     KnownCAsResult:
       type: object
       properties:
         cas:
           type: array
-          items: { $ref: "#/components/schemas/KnownCA" }
+          items: { $ref: "#/components/schemas/CA" }
+          description: |
+            One entry per CAA identifier — the catalog as it is stored, and
+            what a table row or a delete addresses. Several entries repeat one
+            `name`; see `groups`.
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/CAGroup" }
+          description: |
+            The same catalog collapsed to one entry per selectable name.
+            Derived from `cas` in the same response and always consistent
+            with it: every entry in `cas` appears in exactly one group.
+
+            This exists so a picker does not have to re-derive it. `name` is
+            not unique in `cas` — for a stored entry it is the CA owner, and
+            one owner publishes many identifiers — so a picker built
+            straight from `cas` renders one CA as several identical-looking
+            choices that all submit the same string.
         _self: { type: string }
+
+    CAGroup:
+      type: object
+      description: |
+        One selectable CA, and every CAA identifier it covers.
+
+        The grouping key is `name` rather than `owner` because `name` is what
+        `cas`, `exclude_cas` and `expected_issuers` are matched against —
+        grouping by anything else would produce choices a caller cannot
+        submit. A curated entry and CCADB rows sharing a name land in one
+        group, which is why `sources` is a list.
+      properties:
+        name:
+          type: string
+          description: The value to send back in `cas`/`exclude_cas`/`expected_issuers`. Unique across `groups`.
+        identifiers:
+          type: array
+          items: { type: string }
+          description: |
+            Every CAA identifier this name covers, hostname-sorted. Usually
+            one; thirteen for DigiCert. A CA may validate issuance against
+            any of them, so a CAA record naming only one of a multi-identifier
+            CA can block issuance that was meant to be allowed.
+        sources:
+          type: array
+          items: { type: string, enum: [curated, ccadb, operator] }
+          description: Which halves of the catalog contributed, deduplicated and sorted. See `CA.source`.
+        notes:
+          type: array
+          items: { type: string }
+          description: Caveats carried by any entry in the group — empty when there are none.
+
+    CAWrite:
+      type: object
+      required: [identifier, owner]
+      properties:
+        identifier:
+          type: string
+          minLength: 3
+          maxLength: 253
+          pattern: "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$"
+          description: |
+            The CAA issue hostname this CA publishes, e.g.
+            "pki.example.internal". Lowercased on write, and must be a dotted
+            ASCII hostname — it is published verbatim in a CAA `issue`
+            record. Must not already be in the catalog, including as a
+            CCADB-mirrored entry.
+        owner:
+          type: string
+          minLength: 1
+          pattern: "^[^\\u0000]*[^\\u0000\\s][^\\u0000]*$"
+          description: |
+            The human label a picker shows for this CA. Need not be unique —
+            reusing a label the catalog already carries is how a second issue
+            hostname is added for a CA that is already present. Only
+            `identifier` is checked for conflicts.
 
     Variant:
       type: object
@@ -2492,16 +3782,29 @@ components:
         tld: { type: string }
         status:
           type: string
-          enum: [active, parked, registered, unregistered]
+          enum: [active, parked, registered, unregistered, unknown]
           description: |
-            The one-word reading, computed from `registration` and
-            `ns_resolves` rather than stored: `active` (owned and built on),
-            `parked` (bought, nothing standing on it), `registered`
-            (delegated over an RDAP negative — stale RDAP, a registry glitch,
-            or a name mid-drop), `unregistered` (nobody has it, and nothing
-            says otherwise). Delegation is the load-bearing signal in both
-            directions, which is why an unknown registration with nameservers
-            reads `active` while one without them reads `unregistered`.
+            The one-word reading, computed from `registration`, `ns_resolves`
+            and `last_checked_at` rather than stored: `active` (owned and
+            built on), `parked` (bought, nothing standing on it),
+            `registered` (delegated over an RDAP negative — stale RDAP, a
+            registry glitch, or a name mid-drop), `unregistered` (nobody has
+            it, and something looked), `unknown` (nothing has ever scanned
+            this name, so there is no verdict — `last_checked_at` is null).
+
+            Every variant starts `unknown`: generation produces names and
+            never state, so a freshly generated set reads `unknown`
+            throughout until the first scan sweep reaches it. Do not read
+            that as `unregistered`; it is the difference between "we looked
+            and nobody has it" and "we never looked", and the certspotter
+            watchlist watches the second while dropping the first.
+
+            Past that, delegation is the load-bearing signal in both
+            directions, which is why a scanned row with an unknown
+            registration and nameservers reads `active` while one without
+            them reads `unregistered`. Note that `registration: unknown` is
+            narrower than `status: unknown` — it says RDAP had no answer for
+            a name that *was* scanned.
         registration:
           type: string
           enum: [registered, unregistered, unknown]
@@ -2517,7 +3820,16 @@ components:
             lookups — a name nobody has delegated has nothing to resolve.
         resolves:
           type: boolean
-          description: An A or AAAA record answered.
+          description: An A or AAAA record answered. Equivalent to a non-empty `addresses` on any row scanned since addresses were recorded; kept as its own field because it is the filter key and stays meaningful on older rows.
+        addresses:
+          type: array
+          items: { type: string }
+          description: |
+            Where the name points: every A and AAAA answer, as one sorted
+            list of canonical textual IPs (both families share the list —
+            the literal says which it is). Empty when the name resolves to
+            nothing, and empty rather than absent for a variant scanned
+            before addresses were recorded, so the field is always an array.
         mx:
           type: array
           items: { type: string }
@@ -2549,6 +3861,16 @@ components:
           type: [string, "null"]
           format: date-time
           description: When this variant's DNS probe is next due.
+        allowlisted:
+          type: boolean
+          description: |
+            This lookalike is marked "not a threat": no certificate on it,
+            or on any hostname under it, will produce a match while the
+            entry stands. Derived from the live allowlist, not stored on the
+            variant, so it survives regeneration into a new variant set and
+            can never disagree with what the matcher does. Also true for a
+            variant that is itself a watched domain, which is allowlisted
+            automatically. See POST /variants/{id}/allowlist.
         watched_domain:
           allOf: [{ $ref: "#/components/schemas/Domain" }]
           description: |
@@ -2560,6 +3882,267 @@ components:
           type: string
           description: |
             GET this for the variant's own detail — see GET /variants/{id}.
+
+    VariantScanProgress:
+      type: object
+      description: |
+        How far the DNS sweep has got through the set of lookalikes being
+        listed.
+
+        This exists because the rows cannot say it themselves. `ns_resolves`
+        and `resolves` are booleans with no null, so a lookalike nothing has
+        probed yet is indistinguishable from one that was probed and
+        delegates nothing — a freshly generated domain renders as a full page
+        of confident `false`, and filtering it by `ns_resolves=true`
+        correctly returns nothing, which reads as "no lookalike is live" when
+        the truth is "nobody has looked yet". A row's `last_checked_at` is
+        the per-name answer; this is the set-level one.
+      required: [enabled, total, scanned, never_scanned]
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            The live `scan_enabled` setting (PUT /api/v1/settings/variants).
+            Without it, "0 of 2979 scanned" is ambiguous between a backlog
+            that will drain on its own and a scanner somebody switched off.
+        total:
+          type: integer
+          description: |
+            Every variant in the set. Unlike the sibling `total` on the list
+            response, this ignores the request's filters: progress is a
+            property of the whole set, not of the page being rendered. The
+            two are not comparable.
+        scanned:
+          type: integer
+          description: |
+            Variants with a determined DNS probe behind them. Counted from
+            `last_checked_at`, not `next_check_at` — an indeterminate probe
+            schedules a retry without establishing anything, and counting it
+            would report progress that observed nothing.
+        never_scanned:
+          type: integer
+          description: "`total` - `scanned`, carried explicitly so every consumer reads the same number."
+        first_scanned_at:
+          type: [string, "null"]
+          format: date-time
+          description: Earliest probe in the set; null when nothing has been probed.
+        last_scanned_at:
+          type: [string, "null"]
+          format: date-time
+          description: Most recent probe in the set; null when nothing has been probed.
+        next_check_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            The earliest scheduled probe in the set, null when none is
+            scheduled — the normal reading for a set nothing has swept yet,
+            since `next_check_at` is only written once a probe has happened.
+
+            This is not an ETA for that first sweep. The scanner works one
+            global queue across every watched domain, so when an unscanned
+            set gets looked at depends on the work queued ahead of it, which
+            nothing in this object measures.
+
+    DNSSweep:
+      type: object
+      description: |
+        One scope's coverage by the DNS half of variant scanning.
+      required: [total, scanned, never_scanned, due_now, ns_resolves, resolves]
+      properties:
+        total:
+          type: integer
+          description: Every variant in scope, probed or not.
+        scanned:
+          type: integer
+          description: |
+            Variants with a determined probe behind them. Counted from
+            `last_checked_at`, not `next_check_at` — an indeterminate probe
+            schedules a retry without establishing anything, and counting it
+            would report progress that observed nothing.
+        never_scanned:
+          type: integer
+          description: "`total` - `scanned`, sent so two consumers cannot subtract differently."
+        due_now:
+          type: integer
+          description: |
+            Probes the sweep could claim this instant: `next_check_at` in the
+            past, or null, which is what a freshly generated variant has.
+
+            This is the backlog, and the only field here that separates
+            "behind" from "idle" — a stale `last_scanned_at` over `due_now: 0`
+            is a sweep with nothing to do, the same timestamp over a large
+            `due_now` is one that has stopped.
+        ns_resolves:
+          type: integer
+          description: Names in scope that answered with NS records — delegated.
+        resolves:
+          type: integer
+          description: Names in scope that answered with an A or AAAA record.
+        first_scanned_at:
+          type: [string, "null"]
+          format: date-time
+          description: Earliest probe in scope; null when nothing has been probed.
+        last_scanned_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            Most recent probe in scope; null when nothing has been probed.
+            Read together with `due_now` — see that field.
+        next_check_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            The earliest scheduled probe in scope, null when none is
+            scheduled. Not an ETA: the sweep works one global queue across
+            every watched domain, so when a given probe actually happens
+            depends on the work queued ahead of it.
+
+    RDAPSweep:
+      type: object
+      description: |
+        One scope's coverage by the RDAP rotation.
+
+        There is no `next_check_at` counterpart to `DNSSweep`'s. The rotation
+        re-verifies whichever verdict is oldest rather than working a stored
+        schedule, so due-ness is derived from each name's last verdict against
+        `rdap_rotation_days` — the same value the enclosing response reports,
+        so the backlog and the window it was measured against cannot disagree.
+      required:
+        [total, checked, never_checked, due_now, registered, unregistered, unknown]
+      properties:
+        total:
+          type: integer
+          description: Every variant in scope, verified or not.
+        checked:
+          type: integer
+          description: |
+            Names with an RDAP verdict recorded at least once. A TLD
+            publishing no RDAP server never becomes `checked` — nothing
+            answered, which is the honest reading rather than a failure.
+        never_checked: { type: integer }
+        due_now:
+          type: integer
+          description: |
+            Never-checked names plus those whose verdict is older than
+            `rdap_rotation_days`. A rotation of `0` counts only the
+            never-checked ones rather than sweeping the whole set into the
+            backlog.
+        registered:
+          type: integer
+          description: RDAP answered and says the name is taken.
+        unregistered:
+          type: integer
+          description: RDAP answered and says nobody has the name.
+        unknown:
+          type: integer
+          description: |
+            No RDAP verdict is available. This is both "nothing has looked
+            yet" and "this TLD publishes no RDAP service", which is why it is
+            read next to `never_checked` rather than instead of it — see
+            `Variant.registration`.
+        first_checked_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            Oldest verdict in scope; null when nothing has been verified. A
+            rotation that is keeping up holds this no older than
+            `rdap_rotation_days`.
+        last_checked_at:
+          type: [string, "null"]
+          format: date-time
+
+    ScanDomainStatus:
+      type: object
+      description: One watched domain's row on the scan-tracking page.
+      required: [domain_id, domain, dns, rdap]
+      properties:
+        domain_id: { type: integer, format: int64 }
+        domain: { type: string }
+        variant_set_id:
+          type: [integer, "null"]
+          format: int64
+          description: |
+            The active set being swept, null for a domain whose generation has
+            not produced one yet. That null is what distinguishes "nothing to
+            sweep" from a set of zero scanned variants, which is "swept
+            nothing yet" — the two render as identical zeroes otherwise.
+        dns: { $ref: "#/components/schemas/DNSSweep" }
+        rdap: { $ref: "#/components/schemas/RDAPSweep" }
+
+    ScanStatus:
+      type: object
+      required:
+        [enabled, interval_seconds, dns_qps, rdap_qps, rdap_rotation_days,
+         resolvers, dns, rdap, domains, generated_at]
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            The live `scan_enabled` setting (PUT /api/v1/settings/variants).
+            Without it every zero below is ambiguous between a backlog that
+            will drain on its own and a sweep somebody switched off, which are
+            opposite operator actions.
+        interval_seconds:
+          type: integer
+          description: "`scan_interval_seconds`: how often each variant gets its DNS probe."
+        dns_qps:
+          type: number
+          description: "`scan_dns_qps`: the ceiling draining the DNS backlog."
+        rdap_qps:
+          type: number
+          description: "`scan_rdap_qps`: the ceiling draining the RDAP backlog."
+        rdap_rotation_days:
+          type: integer
+          description: |
+            `scan_rdap_rotation_days`: the window `rdap.due_now` was measured
+            against, echoed here so the backlog is never reported without it.
+        resolvers:
+          type: array
+          items: { type: string }
+          description: |
+            `scan_resolvers` — the resolvers the sweep queries. Empty means
+            the host's own.
+        dns:
+          allOf: [{ $ref: "#/components/schemas/DNSSweep" }]
+          description: Fleet-wide, the arithmetic sum of `domains[].dns`.
+        rdap:
+          allOf: [{ $ref: "#/components/schemas/RDAPSweep" }]
+          description: Fleet-wide, the arithmetic sum of `domains[].rdap`.
+        domains:
+          type: array
+          items: { $ref: "#/components/schemas/ScanDomainStatus" }
+          description: |
+            One row per live watched domain, ordered by name — including a
+            domain with no active set, which renders as a zeroed row rather
+            than being omitted.
+        generated_at: { type: string, format: date-time }
+
+    VariantListResponse:
+      type: object
+      description: |
+        One page of lookalikes, plus the sweep progress for the whole set
+        they came from. Shared by every variant list so the three cannot
+        drift apart.
+      required: [variants, scan]
+      properties:
+        variants:
+          type: array
+          items: { $ref: "#/components/schemas/Variant" }
+        next_cursor: { type: [string, "null"] }
+        next:
+          type: [string, "null"]
+          description: |
+            The full request path + query string for the next page — this
+            request's own filters, plus `cursor`. Null when there is no next
+            page.
+        total:
+          type: integer
+          description: Row count matching the current filters, independent of cursor/limit/page.
+        scan:
+          allOf: [{ $ref: "#/components/schemas/VariantScanProgress" }]
+          description: |
+            Sweep progress for the whole set, unfiltered. Always an object,
+            never null.
 
     VariantChange:
       type: object
@@ -2579,8 +4162,14 @@ components:
               gained_mx,
               lost_mx,
               mx_changed,
+              addresses_changed,
             ]
-          description: What moved. One row per transition, never per scan.
+          description: |
+            What moved. One row per transition, never per scan.
+            `addresses_changed` is a lookalike that kept resolving but moved:
+            crossing zero is `began_resolving`/`stopped_resolving` instead,
+            and those carry the addresses in their payload, so one
+            observation never writes two rows.
         observed_at: { type: string, format: date-time }
         fqdn: { type: string, description: The lookalike this transition is about. }
         variant: { type: string, description: Link to the variant's own detail. }
@@ -2757,7 +4346,17 @@ components:
         dns_names: { type: array, items: { type: string } }
         not_before: { type: string, format: date-time }
         not_after: { type: string, format: date-time }
-        is_precert: { type: boolean }
+        is_precert:
+          type: boolean
+          description: |
+            Whether this row is the precertificate half of the issuance. Read
+            off the certificate's own RFC 6962 poison extension wherever the
+            DER was available to the plugin that reported it; inferred from
+            the tbs_sha256 sibling only when it was not, which is the
+            certspotter-with-retention-off case. A precertificate and its
+            final certificate are two rows sharing one `tbs_sha256` — see
+            `merge_tbs_sha256` on GET /matches, which collapses the pair into
+            one finding.
         first_seen_at: { type: string, format: date-time }
         pem_url:
           type: string
@@ -2781,9 +4380,12 @@ components:
       properties:
         fqdn:
           type: string
+          minLength: 1
+          format: idn-hostname
           description: The registrable domain (eTLD+1) to stop alerting on — see internal/match's Snapshot.allowlisted.
         reason:
-          type: string
+          type: [string, "null"]
+          pattern: "^[^\\u0000]*$"
           description: Why this is benign. Unexplained allowlist entries are indistinguishable from mistakes six months later.
 
     NotificationChannel:
@@ -2838,25 +4440,52 @@ components:
       type: object
       required: [name, url]
       properties:
-        name: { type: string }
+        name: { type: string, minLength: 1, pattern: "^[^\\u0000]*[^\\u0000\\s][^\\u0000]*$" }
         url:
           type: string
+          minLength: 1
+          oneOf:
+            # slack/discord: the whole credential is the userinfo username —
+            # a ':' in it means the token got split, which is the error
+            # validateTokenChannel exists to catch — and the channel is the
+            # host. A trailing path, query or fragment is allowed because
+            # buildSlack ignores all three and such a channel does deliver.
+            - pattern: "^(slack|discord)://[A-Za-z0-9._~!$&'()*+,;=-]+@[A-Za-z0-9.-]+(/[A-Za-z0-9._~!$&'()*+,;=:@/-]*)?(\\?[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?(#[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?$"
+            # smtp needs an explicit port (net/smtp dials host:port) plus from
+            # and to; the two orders are spelled out because a regex cannot
+            # say "contains both, either way round".
+            - pattern: "^smtp://([A-Za-z0-9._~!$&'()*+,;=-]+(:[A-Za-z0-9._~!$&'()*+,;=-]*)?@)?[A-Za-z0-9.-]+:[0-9]{1,5}/?\\?([A-Za-z0-9._~=&+-]*&)?from=[A-Za-z0-9._~+-]+&([A-Za-z0-9._~=&+-]*&)?to=[A-Za-z0-9._~+-]+(&[A-Za-z0-9._~=&+-]*)?$"
+            - pattern: "^smtp://([A-Za-z0-9._~!$&'()*+,;=-]+(:[A-Za-z0-9._~!$&'()*+,;=-]*)?@)?[A-Za-z0-9.-]+:[0-9]{1,5}/?\\?([A-Za-z0-9._~=&+-]*&)?to=[A-Za-z0-9._~+-]+&([A-Za-z0-9._~=&+-]*&)?from=[A-Za-z0-9._~+-]+(&[A-Za-z0-9._~=&+-]*)?$"
+            # generic+http(s) needs only a host — buildHTTP will construct a
+            # request for a host-less URL and fail at send time instead.
+            - pattern: "^generic\\+https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~!$&'()*+,;=:@/-]*)?(\\?[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?(#[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?$"
           description: |
             Scheme-routed onto nikoksr/notify (internal/notify/sender.go):
             slack://<bot-token>@<channel-id>, discord://<bot-token>@<channel-id>,
             smtp://[<user>:<pass>@]<host>:<port>/?from=<addr>&to=<addr>[,<addr>...],
             or generic+http(s)://<host>/<path>. Encrypted before it reaches
-            Postgres; never returned by any read.
+            Postgres; never returned by any read. 
+
+            Surrounding whitespace is trimmed and the URL is checked for the
+            shape its scheme's client can use before anything is sent, so a
+            malformed one is a 400 naming the fault rather than a failed
+            delivery. For slack:// and discord:// the entire bot token is the
+            userinfo *user* — a token containing ':' is rejected, because URL
+            syntax would split it into a user and a password and only the
+            part before the ':' would ever reach the API. smtp:// is the
+            exception, where the userinfo password is the SMTP password, and
+            it needs an explicit port. Nothing here constrains the token's
+            own format: the vendor clients don't, so neither does this.
 
             Verified before it is stored: the server delivers a message
             through this URL and creates the channel only if it arrives (502
             otherwise, with nothing persisted). There is no way to opt out —
             a URL that cannot deliver now could not deliver an alert either.
-        min_severity: { type: string, enum: [info, medium, high, critical], default: high }
-        template: { type: string }
-        mode: { type: string, enum: ["", digest] }
-        digest_at: { type: string }
-        enabled: { type: boolean, default: true }
+        min_severity: { type: [string, "null"], enum: [info, medium, high, critical], default: high }
+        template: { type: [string, "null"], pattern: "^[^\\u0000]*$" }
+        mode: { type: [string, "null"], enum: ["", digest] }
+        digest_at: { type: [string, "null"], pattern: "^[^\\u0000]*$" }
+        enabled: { type: [boolean, "null"], default: true }
 
     NotificationChannelPatch:
       type: object
@@ -2866,20 +4495,36 @@ components:
         patch silent: only a patch that carries `url` is a credential write,
         and only that one has to prove delivery first.
       properties:
-        name: { type: string }
+        name: { type: string, minLength: 1, pattern: "^[^\\u0000]*[^\\u0000\\s][^\\u0000]*$" }
         url:
           type: string
+          minLength: 1
+          oneOf:
+            # slack/discord: the whole credential is the userinfo username —
+            # a ':' in it means the token got split, which is the error
+            # validateTokenChannel exists to catch — and the channel is the
+            # host. A trailing path, query or fragment is allowed because
+            # buildSlack ignores all three and such a channel does deliver.
+            - pattern: "^(slack|discord)://[A-Za-z0-9._~!$&'()*+,;=-]+@[A-Za-z0-9.-]+(/[A-Za-z0-9._~!$&'()*+,;=:@/-]*)?(\\?[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?(#[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?$"
+            # smtp needs an explicit port (net/smtp dials host:port) plus from
+            # and to; the two orders are spelled out because a regex cannot
+            # say "contains both, either way round".
+            - pattern: "^smtp://([A-Za-z0-9._~!$&'()*+,;=-]+(:[A-Za-z0-9._~!$&'()*+,;=-]*)?@)?[A-Za-z0-9.-]+:[0-9]{1,5}/?\\?([A-Za-z0-9._~=&+-]*&)?from=[A-Za-z0-9._~+-]+&([A-Za-z0-9._~=&+-]*&)?to=[A-Za-z0-9._~+-]+(&[A-Za-z0-9._~=&+-]*)?$"
+            - pattern: "^smtp://([A-Za-z0-9._~!$&'()*+,;=-]+(:[A-Za-z0-9._~!$&'()*+,;=-]*)?@)?[A-Za-z0-9.-]+:[0-9]{1,5}/?\\?([A-Za-z0-9._~=&+-]*&)?to=[A-Za-z0-9._~+-]+&([A-Za-z0-9._~=&+-]*&)?from=[A-Za-z0-9._~+-]+(&[A-Za-z0-9._~=&+-]*)?$"
+            # generic+http(s) needs only a host — buildHTTP will construct a
+            # request for a host-less URL and fail at send time instead.
+            - pattern: "^generic\\+https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~!$&'()*+,;=:@/-]*)?(\\?[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?(#[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?$"
           description: |
             A new credential, so it is verified exactly like a create: the
             server delivers a message through it and applies the patch only
             if it arrives (502 otherwise, with the channel left unchanged).
             Every other field here changes body context only and sends
             nothing.
-        min_severity: { type: string, enum: [info, medium, high, critical] }
-        template: { type: string }
-        mode: { type: string, enum: ["", digest] }
-        digest_at: { type: string }
-        enabled: { type: boolean }
+        min_severity: { type: [string, "null"], enum: [info, medium, high, critical] }
+        template: { type: [string, "null"], pattern: "^[^\\u0000]*$" }
+        mode: { type: [string, "null"], enum: ["", digest] }
+        digest_at: { type: [string, "null"], pattern: "^[^\\u0000]*$" }
+        enabled: { type: [boolean, "null"] }
 
     NotificationTestRequest:
       type: object
@@ -2888,15 +4533,16 @@ components:
         channel_id:
           type: integer
           format: int64
+          minimum: 1
           description: |
             Delivers through this channel's own decrypted URL regardless of
             its `enabled` state, so an operator can verify a channel before
             switching it on, not only after.
         title:
-          type: string
+          type: [string, "null"]
           description: Defaults to a canned message identifying Merkleye and the channel under test if omitted.
         body:
-          type: string
+          type: [string, "null"]
           description: Defaults to a canned message identifying Merkleye and the channel under test if omitted.
 
     NotificationSettings:
@@ -2915,10 +4561,13 @@ components:
       type: object
       required: [dedup_window, rate_limit_per_channel_per_minute, rate_limit_burst, retry_max_attempts]
       properties:
-        dedup_window: { type: string, description: 'Go duration string, e.g. "24h".' }
-        rate_limit_per_channel_per_minute: { type: integer, minimum: 1 }
-        rate_limit_burst: { type: integer, minimum: 1 }
-        retry_max_attempts: { type: integer, minimum: 1 }
+        dedup_window:
+          type: string
+          pattern: "^0*[1-9][0-9]{0,5}(ns|us|ms|s|m|h)([0-9]{1,6}(ns|us|ms|s|m|h))?$"
+          description: 'Positive Go duration string, e.g. "24h".'
+        rate_limit_per_channel_per_minute: { type: integer, minimum: 1, maximum: 9223372036854775807 }
+        rate_limit_burst: { type: integer, minimum: 1, maximum: 9223372036854775807 }
+        retry_max_attempts: { type: integer, minimum: 1, maximum: 9223372036854775807 }
 
     PluginStatus:
       type: object
@@ -2930,6 +4579,7 @@ components:
         next: { type: "null" }
         watch_set:
           type: object
+          description: The same three counts, with the same meanings, as Summary.watch_set — including `allowlisted` counting allowlist entries rather than the matcher's suppression keys.
           properties:
             domains: { type: integer }
             variants: { type: integer }
@@ -2952,6 +4602,7 @@ components:
               lag_seconds: { type: number }
               observations_total: { type: integer, format: int64 }
               last_error: { type: string }
+              upstream: { $ref: "#/components/schemas/PluginUpstreamHealth" }
               _self: { type: string, description: "GET this for the plugin's own detail — see PluginDetail." }
               logs:
                 type: array
@@ -2980,10 +4631,59 @@ components:
         lag_seconds: { type: number }
         observations_total: { type: integer, format: int64 }
         last_error: { type: string }
+        upstream: { $ref: "#/components/schemas/PluginUpstreamHealth" }
         _self: { type: string }
         logs:
           type: array
           items: { $ref: "#/components/schemas/PluginLogDetail" }
+
+    PluginUpstreamHealth:
+      type: object
+      description: |
+        A sidecar's own self-report, as the plugin last read it. Present only
+        for a plugin that has a sidecar to ask and a source that publishes a
+        health endpoint — certstream against a self-hosted
+        certstream-server-rust today, never against calidog.io's public feed.
+
+        This is not a copy of the sidecar's metrics: those stay on the
+        sidecar's own /metrics endpoint, scraped directly, so that reading
+        them does not depend on Merkleye being up (docs/OBSERVABILITY.md).
+        What is here is the one thing this side of the stream cannot infer —
+        how many of the CT logs the sidecar tails are healthy. `lag_seconds`
+        on the plugin itself stays the signal to alert on, because it
+        measures what Merkleye actually received; this says why that lag
+        looks the way it does.
+      properties:
+        status:
+          type: string
+          description: The upstream's own verdict, verbatim (e.g. "healthy", "degraded"). Not re-derived here — the thresholds behind it are the sidecar's to define.
+        logs_healthy: { type: integer }
+        logs_degraded: { type: integer }
+        logs_unhealthy: { type: integer }
+        logs_total: { type: integer }
+        active_connections:
+          type: integer
+          description: |
+            Connected clients as the sidecar counts them. Verified against
+            certstream-server-rust 1.5.6: this does **not** include SSE
+            subscribers, so it reads 0 while Merkleye is streaming happily —
+            the sidecar's own `certstream_sse_connections` metric is the one
+            that counts those. Do not read 0 here as "nothing is consuming
+            the feed"; `observations_total` on the plugin is that answer.
+        uptime_seconds: { type: number, description: Seconds since the sidecar last restarted. }
+        checked_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            The last *successful* read, so every count above carries its own
+            age. Null when the endpoint has never answered.
+        last_error:
+          type: string
+          description: |
+            Why the most recent poll failed. The counts above are then the
+            last good ones rather than zeros: an unreachable sidecar is not a
+            sidecar reporting zero healthy logs.
+        last_error_at: { type: [string, "null"], format: date-time }
 
     PluginLogDetail:
       type: object
@@ -3041,11 +4741,11 @@ components:
       properties:
         enabled: { type: boolean }
         source:
-          type: string
+          type: [string, "null"]
           enum: [self_hosted, calidog_public]
           default: self_hosted
         url:
-          type: string
+          type: [string, "null"]
           description: SSE (http/https) or WebSocket (ws/wss) endpoint. Empty uses the plugin's built-in default for source.
         auth_token:
           type: [string, "null"]

@@ -11,7 +11,7 @@ go = "1.27.1"
 golangci-lint = "2.13.2"
 # The client generator. Pinned here rather than as a go.mod tool dependency
 # because it is only ever run by `mise run generate`, never imported.
-"go:github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen" = "2.5.0"
+"go:github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen" = "2.8.0"
 # Conformance: drives the MCP Inspector against a running server.
 "npm:@modelcontextprotocol/inspector" = "0.17.2"
 
@@ -22,7 +22,10 @@ run = "git config core.hooksPath .githooks"
 [tasks.generate]
 description = "Regenerate the Merkleye API client from api/openapi.yaml"
 depends = ["hooks"]
-run = "oapi-codegen -config internal/merkleyeapi/codegen.yaml api/openapi.yaml"
+run = """
+python3 scripts/prepare-spec.py
+oapi-codegen -config internal/merkleyeapi/codegen.yaml api/openapi.codegen.yaml
+"""
 
 [tasks.build]
 description = "Build the server"

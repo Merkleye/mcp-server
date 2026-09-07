@@ -123,7 +123,7 @@ func TestReadToolNamesAreStable(t *testing.T) {
 
 	want := []string{
 		"search", "list_matches", "get_match", "list_domains", "get_domain",
-		"list_variants", "get_domain_caa", "get_domain_dns_provider",
+		"list_variants", "list_all_variants", "get_domain_caa", "get_domain_dns_provider",
 		"get_certificate", "list_allowlist", "get_summary", "get_audit_log",
 	}
 	for _, name := range want {
@@ -178,5 +178,44 @@ func TestMissingCredentialIsAToolError(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatal("a missing credential was not reported as a tool error")
+	}
+}
+
+// Read tools must say they are read-only. A client uses this to decide whether
+// to confirm with a human, and a list call that prompts like a mutation trains
+// people to click through the prompts that do matter.
+func TestReadToolsAreAnnotatedReadOnly(t *testing.T) {
+	tools := listTools(t, newTestServer(t, nil))
+
+	for name, tool := range tools {
+		if tool.Annotations == nil {
+			t.Errorf("read tool %q has no annotations", name)
+			continue
+		}
+		if !tool.Annotations.ReadOnlyHint {
+			t.Errorf("read tool %q is not annotated read-only", name)
+		}
+		if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+			t.Errorf("read tool %q does not explicitly disclaim being destructive", name)
+		}
+	}
+}
+
+// The inverse: nothing that mutates may claim to be read-only.
+func TestMutatingToolsAreNotAnnotatedReadOnly(t *testing.T) {
+	all := listTools(t, newTestServer(t, func(c *config.Config) {
+		writes := false
+		c.Tools.ReadOnly = &writes
+		c.Tools.Destructive = true
+	}))
+	readOnly := listTools(t, newTestServer(t, nil))
+
+	for name, tool := range all {
+		if _, isRead := readOnly[name]; isRead {
+			continue
+		}
+		if tool.Annotations != nil && tool.Annotations.ReadOnlyHint {
+			t.Errorf("mutating tool %q is annotated read-only", name)
+		}
 	}
 }
