@@ -1,0 +1,19 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Repo-specific Renovate config. Org-wide policy -- grouping, scheduling, semantic commits, the gomod gomodTidy and indirect-dependency rules -- reaches this repository automatically through Renovate's config inheritance from Merkleye/renovate-config's org-inherited-config.json. It is deliberately neither repeated nor `extends`-ed here: inheritance is applied before repository config is loaded, and `extends: local>Merkleye/renovate-config` would resolve that repo's own near-empty renovate.json rather than the org policy file, which would be a confusing no-op.",
+    "Repository config merges over inherited config, and packageRules concatenate rather than replace. The rule below is therefore appended after the org's rules and evaluated last, which is what lets it override the inherited 'Go indirect dependencies' rule for exactly one package while leaving the other twenty rules intact."
+  ],
+  "packageRules": [
+    {
+      "description": [
+        "Hold github.com/dprotaso/go-yit at its 2022 digest. Newer digests move it from gopkg.in/yaml.v3 to go.yaml.in/yaml/v4, which then does not compile against its only consumer in this module graph: github.com/vmware-labs/yaml-jsonpath@v0.3.2, unmaintained since 2021-06-15 and still on yaml.v3. Both upstreams that could fix it are already at their newest releases -- oapi-codegen v2.8.0 and speakeasy-api/openapi v1.25.1 -- so no combination of versions takes the update and still builds. Full analysis and reproduction: https://github.com/Merkleye/mcp-server/pull/9",
+        "The scope is one package on purpose. go-yit is reached only through oapi-codegen, which is a go.mod tool directive, so this is build-time only -- it is never linked into merkleye-mcp and carries no runtime or security exposure. Disabling it costs nothing operationally and nothing else in the graph is affected.",
+        "Remove this rule when any one of these becomes true: yaml-jsonpath is maintained again or migrates to yaml/v4; speakeasy-api/openapi drops its yaml-jsonpath dependency; oapi-codegen drops or replaces the overlay loader; or this repository moves off oapi-codegen."
+      ],
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["github.com/dprotaso/go-yit"],
+      "enabled": false
+    }
+  ]
+}
