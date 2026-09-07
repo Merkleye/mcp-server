@@ -24,15 +24,26 @@ func (s *Server) wrap(ctx context.Context, fn func(ctx context.Context) (any, er
 	return res, nil, err
 }
 
-// readOnlyHint and friends are the annotations an MCP client uses to decide
-// what to confirm with a human before running. They are advisory — merkleye
-// enforces regardless — but getting them wrong means a client either nags
-// about a list call or silently runs a delete.
-func readHints(title string) *mcp.ToolAnnotations {
-	return &mcp.ToolAnnotations{
-		Title:        title,
-		ReadOnlyHint: true,
+// addRead registers a read-only tool, annotating it as such.
+//
+// The annotation is what an MCP client uses to decide whether to confirm with a
+// human before running. It is advisory — merkleye enforces regardless — but
+// leaving it off makes a client treat a list call like a mutation and prompt
+// for it, which trains people to click through prompts that do matter.
+//
+// Setting it here rather than at each registration means a read tool cannot be
+// added without it.
+func addRead[In any](srv *mcp.Server, tool *mcp.Tool, h mcp.ToolHandlerFor[In, any]) {
+	if tool.Annotations == nil {
+		tool.Annotations = &mcp.ToolAnnotations{Title: tool.Title}
 	}
+	tool.Annotations.ReadOnlyHint = true
+	// A read tool is trivially idempotent and cannot destroy anything; saying
+	// so explicitly stops a client inferring otherwise from the zero value.
+	destructive := false
+	tool.Annotations.DestructiveHint = &destructive
+	tool.Annotations.IdempotentHint = true
+	mcp.AddTool(srv, tool, h)
 }
 
 func writeHints(title string, destructive bool) *mcp.ToolAnnotations {

@@ -4,5 +4,9 @@
 # a contract drift waiting to happen. `mise run generate` after a clone.
 /internal/merkleyeapi/client.gen.go
 
+# Build artifact: api/openapi.yaml with the empty-string parameter unions
+# collapsed so oapi-codegen can generate from it. See scripts/prepare-spec.py.
+/api/openapi.codegen.yaml
+
 /merkleye-mcp
 /dist/

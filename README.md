@@ -19,7 +19,7 @@ Merkleye API and owns no data of its own; the whole surface is derived from
 | OIDC auth | **Scaffolded.** Discovery and the 401 challenge are real; sign-in is refused with an explanation until merkleye grows `POST /api/v1/auth/token/exchange`. See [`docs/PLAN.md` §4.4](docs/PLAN.md). |
 | stdio transport | Working. |
 | Streamable HTTP | Working. |
-| Tools / resources / prompts | 12 read tools, 11 write tools behind `read_only: false`, 2 destructive behind `destructive: true`, 7 resources, 3 prompts. |
+| Tools / resources / prompts | 13 read tools, 12 write tools behind `read_only: false`, 2 destructive behind `destructive: true`, 8 resources, 3 prompts. |
 | Live match subscriptions | Not started (phase 4). |
 
 ## Quick start
@@ -90,6 +90,12 @@ mise install       # provision the pinned toolchain
 mise run generate  # generate the API client from api/openapi.yaml
 mise run check     # fmt + vet + lint + govulncheck + tests + spec drift
 ```
+
+The client is generated from the upstream spec vendored at
+[`api/openapi.yaml`](api/openapi.yaml), pinned by commit in
+[`api/SPEC_VERSION`](api/SPEC_VERSION) and verified against upstream by
+`mise run spec`. To move to a newer merkleye: copy its `api/openapi.yaml` in,
+put the commit in `api/SPEC_VERSION`, and run `mise run generate && mise run check`.
 
 `mise.toml` owns tools *and* tasks, and CI runs the same tasks.
 

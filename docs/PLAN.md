@@ -382,11 +382,15 @@ reference data becomes resources.
 `acknowledge_matches` · `allowlist_from_match` · `rescore_match` ·
 `get_certificate`
 
+**Hunting** — `list_all_variants`, across every watched domain at once. A
+registered lookalike that resolves *and* publishes MX has a phishing capability
+a parked name does not; those filters are how an agent finds them.
+
 **Domains** — `list_domains` · `get_domain` · `add_domain` · `update_domain` ·
 `remove_domain` · `get_domain_policies` · `set_domain_policies`
 
-**Variants** — `list_variants` · `list_variant_changes` · `preview_variants` ·
-`regenerate_variants`
+**Variants** — `list_variants` · `list_all_variants` · `preview_variants` ·
+`regenerate_variants` · `allowlist_variant` · `unallowlist_variant`
 
 **Posture** — `get_domain_caa` · `get_domain_dns_provider` · `get_summary` ·
 `get_audit_log`

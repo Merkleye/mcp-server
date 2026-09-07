@@ -60,8 +60,32 @@ data, and it authorizes nothing.
   a variant's `registration` is RDAP's answer and `ns_resolves` is DNS's.
 - The generated client (`internal/merkleyeapi/client.gen.go`) is not committed
   and never hand-edited. `mise run generate` after a clone.
+- **`api/openapi.yaml` is never edited.** It is the upstream artifact, byte-
+  identical to the commit in `api/SPEC_VERSION`, and `mise run spec` proves it.
+  When the spec declares something the generator cannot handle, the fix goes in
+  `scripts/prepare-spec.py`, which writes a gitignored build copy — never in the
+  vendored file, because an edit there either breaks the drift check or gets
+  absorbed by re-pinning, and then the client is generated against a contract
+  merkleye does not serve.
 - `mise.toml` owns tools *and* tasks; CI runs the same tasks. Container images
   use `Containerfile`, not `Dockerfile`.
+
+## Upgrading to a newer merkleye
+
+1. Copy its `api/openapi.yaml` over ours and put the commit in
+   `api/SPEC_VERSION`.
+2. `mise run generate` — `scripts/prepare-spec.py` runs first and reports how
+   many parameter unions it collapsed. A warning about an `anyOf` it left alone
+   is the thing to read: an unhandled union is how `undefined: N0` comes back.
+3. `mise run check`, then fix what the compiler objects to. Contract changes
+   arrive as type errors, which is the point of generating rather than
+   hand-writing the client.
+4. Diff the operation list. New operations are opportunities, not obligations —
+   add a tool only where it serves a workflow, and remember that 63 tools is
+   worse than 20.
+5. Run the live pass. Query-parameter serialisation in particular is invisible
+   to the compiler: `severity` is declared `style: form, explode: false`, so it
+   goes over the wire comma-joined, and only a real request shows that.
 
 ## Result sizing is a correctness concern
 

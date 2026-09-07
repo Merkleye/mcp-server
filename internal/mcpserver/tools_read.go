@@ -20,15 +20,15 @@ type searchArgs struct {
 }
 
 type listMatchesArgs struct {
-	Domain       string `json:"domain,omitempty" jsonschema:"Exact watched-domain name to restrict to, e.g. example.com"`
-	Severity     string `json:"severity,omitempty" jsonschema:"Comma-separated severities: suppressed, info, medium, high, critical. Omit for all"`
-	Acknowledged *bool  `json:"acknowledged,omitempty" jsonschema:"false shows only untriaged matches - the usual starting point"`
-	MatchedName  string `json:"matched_name,omitempty" jsonschema:"Case-insensitive substring of the observed SAN. Must be a punycode A-label, not Unicode"`
-	IssuerOrg    string `json:"issuer_org,omitempty" jsonschema:"Case-insensitive substring of the certificate issuer organization"`
-	RiskScoreMin int    `json:"risk_score_min,omitempty" jsonschema:"Lowest risk score to include"`
-	CreatedAfter string `json:"created_after,omitempty" jsonschema:"Only matches first seen at or after this RFC 3339 UTC timestamp, e.g. 2026-08-19T02:07:00Z"`
-	Cursor       int    `json:"cursor,omitempty" jsonschema:"next_cursor from a previous call. Page with this rather than raising the limit"`
-	Limit        int    `json:"limit,omitempty" jsonschema:"Results per page"`
+	Domain       string   `json:"domain,omitempty" jsonschema:"Exact watched-domain name to restrict to, e.g. example.com"`
+	Severity     []string `json:"severity,omitempty" jsonschema:"Severities to include, any of: suppressed, info, medium, high, critical. Omit for all"`
+	Acknowledged *bool    `json:"acknowledged,omitempty" jsonschema:"false shows only untriaged matches - the usual starting point"`
+	MatchedName  string   `json:"matched_name,omitempty" jsonschema:"Case-insensitive substring of the observed SAN. Must be a punycode A-label, not Unicode"`
+	IssuerOrg    string   `json:"issuer_org,omitempty" jsonschema:"Case-insensitive substring of the certificate issuer organization"`
+	RiskScoreMin int      `json:"risk_score_min,omitempty" jsonschema:"Lowest risk score to include"`
+	CreatedAfter string   `json:"created_after,omitempty" jsonschema:"Only matches first seen at or after this RFC 3339 UTC timestamp, e.g. 2026-08-19T02:07:00Z"`
+	Cursor       int64    `json:"cursor,omitempty" jsonschema:"next_cursor from a previous call. Page with this rather than raising the limit"`
+	Limit        int      `json:"limit,omitempty" jsonschema:"Results per page"`
 }
 
 type idArgs struct {
@@ -37,7 +37,7 @@ type idArgs struct {
 
 type listDomainsArgs struct {
 	Status string `json:"status,omitempty" jsonschema:"live (default), deleted, or all. deleted is the only way to find a soft-deleted domain's id"`
-	Cursor int    `json:"cursor,omitempty" jsonschema:"next_cursor from a previous call"`
+	Cursor int64  `json:"cursor,omitempty" jsonschema:"next_cursor from a previous call"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Results per page"`
 }
 
@@ -45,7 +45,17 @@ type listVariantsArgs struct {
 	DomainID     int64  `json:"domain_id" jsonschema:"The watched domain whose generated lookalikes to list"`
 	Registration string `json:"registration,omitempty" jsonschema:"RDAP verdict: registered, unregistered, or unknown. unknown means no RDAP answer was available, which is not the same as unregistered"`
 	Algorithm    string `json:"algorithm,omitempty" jsonschema:"Restrict to one dnstwist fuzzer, e.g. homoglyph"`
-	Cursor       string `json:"cursor,omitempty" jsonschema:"next_cursor from a previous call"`
+	Cursor       int64  `json:"cursor,omitempty" jsonschema:"next_cursor from a previous call"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"Results per page"`
+}
+
+type listAllVariantsArgs struct {
+	Query        string `json:"query,omitempty" jsonschema:"Case-insensitive substring of the lookalike's own name"`
+	DomainID     int64  `json:"domain_id,omitempty" jsonschema:"Restrict to one watched domain's lookalikes. Omit for every watched domain at once"`
+	Registration string `json:"registration,omitempty" jsonschema:"RDAP verdict: registered, unregistered, or unknown. unknown means no RDAP answer was available, which is not the same as unregistered"`
+	Resolves     *bool  `json:"resolves,omitempty" jsonschema:"Whether the name has an A or AAAA record. Omit to not filter - false is a real answer, not the absence of one"`
+	HasMX        *bool  `json:"has_mx,omitempty" jsonschema:"Whether the name publishes any MX host. A lookalike that takes mail is a phishing capability a parked one does not have"`
+	Cursor       int64  `json:"cursor,omitempty" jsonschema:"next_cursor from a previous call"`
 	Limit        int    `json:"limit,omitempty" jsonschema:"Results per page"`
 }
 
@@ -53,7 +63,7 @@ type auditArgs struct {
 	Actor  string `json:"actor,omitempty" jsonschema:"Restrict to one actor"`
 	Action string `json:"action,omitempty" jsonschema:"Restrict to one action, e.g. match.acknowledge"`
 	Since  string `json:"since,omitempty" jsonschema:"RFC 3339 UTC lower bound, e.g. 2026-08-19T02:07:00Z"`
-	Cursor string `json:"cursor,omitempty" jsonschema:"next_cursor from a previous call"`
+	Cursor int64  `json:"cursor,omitempty" jsonschema:"next_cursor from a previous call"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Results per page"`
 }
 
@@ -67,7 +77,7 @@ type certArgs struct {
 }
 
 func (s *Server) registerReadTools(srv *mcp.Server) {
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:  "search",
 		Title: "Search Merkleye",
 		Description: "Search domains, matches and variants in one request. The best starting point " +
@@ -82,7 +92,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:  "list_matches",
 		Title: "List matches",
 		Description: "Matches across every watched domain, newest first. Returns compact summaries — " +
@@ -94,8 +104,16 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 			limit := s.clampLimit(args.Limit)
 			params.Limit = &limit
 			setIfNotEmpty(&params.Domain, args.Domain)
-			setIfNotEmpty(&params.Severity, args.Severity)
 			setIfNotEmpty(&params.MatchedName, args.MatchedName)
+			if len(args.Severity) > 0 {
+				// merkleye@2ce4b5e made severity a repeated typed parameter
+				// rather than one comma-separated string.
+				severities := make([]merkleyeapi.ListMatchesParamsSeverity, 0, len(args.Severity))
+				for _, sev := range args.Severity {
+					severities = append(severities, merkleyeapi.ListMatchesParamsSeverity(sev))
+				}
+				params.Severity = &severities
+			}
 			setIfNotEmpty(&params.IssuerOrg, args.IssuerOrg)
 			if args.RiskScoreMin > 0 {
 				params.RiskScoreMin = &args.RiskScoreMin
@@ -119,7 +137,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:  "get_match",
 		Title: "Match detail",
 		Description: "One match in full: the certificate, the risk breakdown that produced its severity, " +
@@ -130,7 +148,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:        "list_domains",
 		Title:       "List watched domains",
 		Description: "Domains Merkleye is watching. Compact summaries; use get_domain for the full record.",
@@ -155,7 +173,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:        "get_domain",
 		Title:       "Domain detail",
 		Description: "One watched domain in full, including its issuer policy and counts.",
@@ -165,7 +183,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:  "list_variants",
 		Title: "List generated lookalikes",
 		Description: "Lookalikes generated for a watched domain. registration is RDAP's answer and " +
@@ -178,7 +196,9 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 			params.Limit = &limit
 			setIfNotEmpty(&params.Registration, args.Registration)
 			setIfNotEmpty(&params.Algorithm, args.Algorithm)
-			setIfNotEmpty(&params.Cursor, args.Cursor)
+			if args.Cursor > 0 {
+				params.Cursor = &args.Cursor
+			}
 
 			value, err := merkleyeapi.Decode(s.api.Gen().ListDomainVariants(ctx, args.DomainID, params))
 			if err != nil {
@@ -188,7 +208,40 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
+		Name:  "list_all_variants",
+		Title: "List lookalikes across every domain",
+		Description: "Generated lookalikes across all watched domains at once, rather than one domain's. " +
+			"Use for hunting rather than investigating: a registered lookalike that resolves and " +
+			"publishes MX has a phishing capability a parked name does not, and this is how you find " +
+			"those. registration is RDAP's answer and resolves/has_mx are DNS's; neither is written " +
+			"from a lookup that failed.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listAllVariantsArgs) (*mcp.CallToolResult, any, error) {
+		return s.wrap(ctx, func(ctx context.Context) (any, error) {
+			params := &merkleyeapi.ListVariantsParams{
+				Resolves: args.Resolves,
+				HasMx:    args.HasMX,
+			}
+			limit := s.clampLimit(args.Limit)
+			params.Limit = &limit
+			setIfNotEmpty(&params.Registration, args.Registration)
+			setIfNotEmpty(&params.Q, args.Query)
+			if args.DomainID > 0 {
+				params.DomainId = &args.DomainID
+			}
+			if args.Cursor > 0 {
+				params.Cursor = &args.Cursor
+			}
+
+			value, err := merkleyeapi.Decode(s.api.Gen().ListVariants(ctx, params))
+			if err != nil {
+				return nil, err
+			}
+			return projectList(value, "variants", variantSummary), nil
+		})
+	})
+
+	addRead(srv, &mcp.Tool{
 		Name:        "get_domain_caa",
 		Title:       "Generate CAA records",
 		Description: "CAA records generated from a domain's issuer policy — what to publish in DNS so other CAs cannot issue for it.",
@@ -198,7 +251,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:        "get_domain_dns_provider",
 		Title:       "Detect DNS host",
 		Description: "The domain's DNS host, inferred from its nameservers.",
@@ -208,7 +261,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:        "get_certificate",
 		Title:       "Certificate detail",
 		Description: "One observed certificate by SHA-256 of its DER. Set pem=true for the raw PEM.",
@@ -225,7 +278,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:        "list_allowlist",
 		Title:       "List allowlisted lookalikes",
 		Description: "Names Merkleye deliberately stops alerting on. Small and human-curated, so it is never paginated.",
@@ -239,7 +292,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:        "get_summary",
 		Title:       "Dashboard rollup",
 		Description: "Counts and health across every watched domain. Cheap; a good first call to orient yourself.",
@@ -251,7 +304,7 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 		})
 	})
 
-	add(srv, &mcp.Tool{
+	addRead(srv, &mcp.Tool{
 		Name:        "get_audit_log",
 		Title:       "Audit log",
 		Description: "Append-only record of every mutation: who changed what, when. Use it to answer \"who acknowledged this\".",
@@ -262,7 +315,10 @@ func (s *Server) registerReadTools(srv *mcp.Server) {
 			params.Limit = &limit
 			setIfNotEmpty(&params.Actor, args.Actor)
 			setIfNotEmpty(&params.Action, args.Action)
-			setIfNotEmpty(&params.Cursor, args.Cursor)
+			if args.Cursor > 0 {
+				cursor := merkleyeapi.Cursor(args.Cursor)
+				params.Cursor = &cursor
+			}
 			if args.Since != "" {
 				t, err := parseTime(args.Since, "since")
 				if err != nil {
