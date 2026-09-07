@@ -147,11 +147,15 @@ and neither is optional:
   mode that exists any more; instead the failure mode is a bad pin, and the
   fetch fails loudly on a 404 rather than falling back to anything.
 
-  It needs a token that can read merkleye — `MERKLEYE_SPEC_TOKEN`, `GH_TOKEN`
+  It needs a token that can read merkleye — `MERKLEYE_BACKEND_TOKEN`, `GH_TOKEN`
   or `GITHUB_TOKEN`, in that order — and **fails without one**, deliberately:
   there is nothing to build against. Note the default `GITHUB_TOKEN` in Actions
-  is scoped to this repository only and cannot read merkleye, so CI needs
-  `MERKLEYE_SPEC_TOKEN` as a repository secret.
+  is scoped to this repository only and cannot read merkleye.
+
+  `MERKLEYE_BACKEND_TOKEN` is an **organization secret**, shared by every
+  Merkleye repo that reads the backend. It is named for the access it grants,
+  not for this repo's use of it, so don't rename it here to something
+  spec-specific — the point is that one name works everywhere.
 
   When an upstream spec PR merges, pin to the *merged* commit on `main`, not
   the branch commit: a squash merge gives the change a new SHA and the branch

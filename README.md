@@ -92,7 +92,7 @@ could not.
 ## Development
 
 ```bash
-export MERKLEYE_SPEC_TOKEN=<token that can read merkleye/merkleye>
+export MERKLEYE_BACKEND_TOKEN=<token that can read merkleye/merkleye>
 
 mise install       # provision the pinned toolchain
 mise run generate  # fetch the pinned spec, then generate the API client
