@@ -12,9 +12,13 @@
 # newer merkleye is a one-line change to api/SPEC_VERSION.
 #
 # merkleye is private, so this needs a credential that can read it:
-# MERKLEYE_SPEC_TOKEN, GH_TOKEN or GITHUB_TOKEN, in that order. In Actions the
-# default GITHUB_TOKEN is scoped to *this* repository and cannot read merkleye,
-# so a PAT or App token has to be supplied as MERKLEYE_SPEC_TOKEN.
+# MERKLEYE_BACKEND_TOKEN, GH_TOKEN or GITHUB_TOKEN, in that order.
+#
+# MERKLEYE_BACKEND_TOKEN is an organization secret, named for what it grants —
+# read access to the merkleye backend repository — rather than for what any one
+# consumer does with it, so every repo that needs the backend uses the same
+# name. In Actions the default GITHUB_TOKEN is scoped to *this* repository and
+# can never read merkleye.
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -36,18 +40,19 @@ if [ -f "$OUT" ] && [ -f "api/.spec-fetched-at" ] && [ "$(cat api/.spec-fetched-
 	exit 0
 fi
 
-token="${MERKLEYE_SPEC_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+token="${MERKLEYE_BACKEND_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
 if [ -z "$token" ]; then
 	cat >&2 <<'MSG'
-No GitHub token available (MERKLEYE_SPEC_TOKEN, GH_TOKEN or GITHUB_TOKEN).
+No GitHub token available (MERKLEYE_BACKEND_TOKEN, GH_TOKEN or GITHUB_TOKEN).
 
 merkleye is private and its OpenAPI spec is not vendored here, so the client
 cannot be generated without a credential that can read merkleye/merkleye.
 
-  export MERKLEYE_SPEC_TOKEN=<a PAT or App token with read access>
+  export MERKLEYE_BACKEND_TOKEN=<a PAT or App token with read access>
 
 In GitHub Actions, the default GITHUB_TOKEN is scoped to this repository only
-and will not work; set MERKLEYE_SPEC_TOKEN as a repository secret.
+and will not work. MERKLEYE_BACKEND_TOKEN is an organization secret; check that
+this repository is in its access list.
 MSG
 	exit 1
 fi
@@ -95,8 +100,9 @@ merkleye is private, and GitHub answers 404 rather than 403 for a private
 repository a token cannot see -- so this is an access problem, not a bad pin.
 
 In GitHub Actions the default GITHUB_TOKEN is scoped to this repository only
-and can never read merkleye. Set MERKLEYE_SPEC_TOKEN to a PAT or App token with
-read access to merkleye/merkleye, as a repository secret.
+and can never read merkleye. MERKLEYE_BACKEND_TOKEN is the organization secret
+that does; if it is set, check that this repository is in its access list and
+that the token itself still has read access to merkleye/merkleye.
 MSG
 		else
 			cat >&2 <<MSG

@@ -24,11 +24,15 @@ concurrency:
 # code with no diff and no review. The trailing comment records which release
 # the SHA was, so Renovate can bump both together.
 #
-# MERKLEYE_SPEC_TOKEN is required, not optional. merkleye's OpenAPI spec is
+# MERKLEYE_BACKEND_TOKEN is required, not optional. merkleye's OpenAPI spec is
 # private and deliberately not stored in this repository, so nothing here can
 # generate the API client without a credential that can read merkleye/merkleye.
-# The default GITHUB_TOKEN is scoped to this repository and will not do; supply
-# a PAT or App token as a repository secret.
+# The default GITHUB_TOKEN is scoped to this repository and will not do.
+#
+# It is an organization secret, shared by every Merkleye repo that needs to read
+# the backend, and named for the access it grants rather than for what this repo
+# does with it. If a job fails at the fetch step, check this repository is in the
+# secret's access list.
 
 jobs:
   check:
@@ -40,7 +44,7 @@ jobs:
     # happens to have cached the fetch first, which is a step-ordering
     # coincidence, not a guarantee.
     env:
-      MERKLEYE_SPEC_TOKEN: ${{ secrets.MERKLEYE_SPEC_TOKEN }}
+      MERKLEYE_BACKEND_TOKEN: ${{ secrets.MERKLEYE_BACKEND_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -86,7 +90,7 @@ jobs:
     name: Vulnerabilities
     runs-on: ubuntu-latest
     env:
-      MERKLEYE_SPEC_TOKEN: ${{ secrets.MERKLEYE_SPEC_TOKEN }}
+      MERKLEYE_BACKEND_TOKEN: ${{ secrets.MERKLEYE_BACKEND_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -105,7 +109,7 @@ jobs:
     name: Build image
     runs-on: ubuntu-latest
     env:
-      MERKLEYE_SPEC_TOKEN: ${{ secrets.MERKLEYE_SPEC_TOKEN }}
+      MERKLEYE_BACKEND_TOKEN: ${{ secrets.MERKLEYE_BACKEND_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
