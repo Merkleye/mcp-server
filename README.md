@@ -117,7 +117,9 @@ commit directly.
 
 ## License
 
-**Not yet decided.** This repository previously carried an Apache-2.0 LICENSE
-copied from the core repository. That was wrong — merkleye is not open source —
-so the file has been removed. Until a licence is chosen, treat this code as
-proprietary with all rights reserved.
+Apache-2.0, for this repository only.
+
+merkleye itself is not open source, and this server does not redistribute any
+part of it: the OpenAPI contract it builds against is fetched at build time and
+never stored here (see [Development](#development)). What is licensed here is
+the MCP server — a client of that API — and nothing else.
