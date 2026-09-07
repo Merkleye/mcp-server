@@ -41,6 +41,11 @@ type updateDomainArgs struct {
 	IncludeSubdomains *bool `json:"include_subdomains,omitempty" jsonschema:"Also match certificates for subdomains"`
 }
 
+type allowlistVariantArgs struct {
+	ID     int64  `json:"id" jsonschema:"The variant to mark as benign"`
+	Reason string `json:"reason,omitempty" jsonschema:"Why this lookalike is benign. Unexplained allowlist entries are indistinguishable from mistakes six months later"`
+}
+
 type addAllowlistArgs struct {
 	FQDN   string `json:"fqdn" jsonschema:"The registrable domain (eTLD+1) to stop alerting on"`
 	Reason string `json:"reason,omitempty" jsonschema:"Why this is benign"`
@@ -62,7 +67,7 @@ func (s *Server) registerWriteTools(srv *mcp.Server) {
 		Annotations: writeHints("Acknowledge matches", false),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args acknowledgeArgs) (*mcp.CallToolResult, any, error) {
 		return s.wrap(ctx, func(ctx context.Context) (any, error) {
-			body := merkleyeapi.AcknowledgeMatchesJSONRequestBody{Ids: args.IDs}
+			body := merkleyeapi.AcknowledgeMatchesJSONRequestBody{Ids: pointersTo(args.IDs)}
 			if args.Note != "" {
 				body.Note = &args.Note
 			}
@@ -104,13 +109,11 @@ func (s *Server) registerWriteTools(srv *mcp.Server) {
 		Annotations: writeHints("Watch a domain", false),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args addDomainArgs) (*mcp.CallToolResult, any, error) {
 		return s.wrap(ctx, func(ctx context.Context) (any, error) {
-			issuers := args.ExpectedIssuers
-			if issuers == nil {
-				issuers = []string{}
-			}
 			body := merkleyeapi.CreateDomainJSONRequestBody{
-				Domain:          args.Domain,
-				ExpectedIssuers: issuers,
+				Domain: args.Domain,
+				// Never nil: the schema requires the key, and a nil slice
+				// marshals to JSON null against an array the server insists on.
+				ExpectedIssuers: pointersTo(args.ExpectedIssuers),
 			}
 			if args.IncludeSubdomains {
 				body.IncludeSubdomains = &args.IncludeSubdomains
@@ -145,6 +148,33 @@ func (s *Server) registerWriteTools(srv *mcp.Server) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args idArgs) (*mcp.CallToolResult, any, error) {
 		return s.wrap(ctx, func(ctx context.Context) (any, error) {
 			return merkleyeapi.Decode(s.api.Gen().DeleteDomain(ctx, args.ID))
+		})
+	})
+
+	add(srv, &mcp.Tool{
+		Name:  "allowlist_variant",
+		Title: "Mark a lookalike as benign",
+		Description: "Allowlist a generated variant directly, without waiting for it to produce a match. " +
+			"Use when a lookalike is known to be ours or a partner's. Reversible with unallowlist_variant.",
+		Annotations: writeHints("Allowlist a variant", false),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args allowlistVariantArgs) (*mcp.CallToolResult, any, error) {
+		return s.wrap(ctx, func(ctx context.Context) (any, error) {
+			body := merkleyeapi.AllowlistVariantJSONRequestBody{}
+			if args.Reason != "" {
+				body.Reason = &args.Reason
+			}
+			return merkleyeapi.Decode(s.api.Gen().AllowlistVariant(ctx, args.ID, body))
+		})
+	})
+
+	add(srv, &mcp.Tool{
+		Name:        "unallowlist_variant",
+		Title:       "Resume alerting on a lookalike",
+		Description: "Undo allowlist_variant, so this lookalike alerts again.",
+		Annotations: writeHints("Un-allowlist a variant", false),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args idArgs) (*mcp.CallToolResult, any, error) {
+		return s.wrap(ctx, func(ctx context.Context) (any, error) {
+			return merkleyeapi.Decode(s.api.Gen().UnallowlistVariant(ctx, args.ID))
 		})
 	})
 
@@ -242,4 +272,21 @@ func (s *Server) registerDestructiveTools(srv *mcp.Server) {
 			}))
 		})
 	})
+}
+
+// pointersTo converts a slice of values into the slice of pointers the
+// generated request bodies want.
+//
+// merkleye@2ce4b5e declares these array items as nullable — `type: [integer,
+// "null"]` for match ids, `[string, "null"]` for expected issuers — so the
+// generator renders them as []*T. Nothing here ever sends a null element; the
+// pointers exist only to match the declared shape. Always returns a non-nil
+// slice, because a nil one marshals to JSON null against a schema that requires
+// an array.
+func pointersTo[T any](values []T) []*T {
+	out := make([]*T, 0, len(values))
+	for i := range values {
+		out = append(out, &values[i])
+	}
+	return out
 }

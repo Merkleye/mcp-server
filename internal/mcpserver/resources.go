@@ -37,7 +37,23 @@ func (s *Server) registerResources(srv *mcp.Server) {
 			description: "The CA catalog CAA generation resolves against. Issuer matching is a " +
 				"case-insensitive substring, not equality, because intermediates rotate without notice.",
 			fetch: func(ctx context.Context) (any, error) {
-				return merkleyeapi.Decode(s.api.Gen().ListKnownCAs(ctx))
+				// Include the stored catalog (CCADB mirror plus operator-added
+				// CAs), not just the curated in-process list — an agent
+				// checking an issuer against policy wants the CAs this
+				// deployment actually knows about.
+				includeUserCAs := true
+				return merkleyeapi.Decode(s.api.Gen().ListKnownCAs(ctx, &merkleyeapi.ListKnownCAsParams{
+					IncludeUserCAs: &includeUserCAs,
+				}))
+			},
+		},
+		{
+			uri: "merkleye://scan", name: "scan-status", title: "Variant scan status",
+			description: "Progress of the DNS and RDAP sweeps that keep variant registration and " +
+				"ns_resolves current. Worth reading before trusting a variant's state: a sweep " +
+				"that has not run recently means the answers are stale, not that the names are free.",
+			fetch: func(ctx context.Context) (any, error) {
+				return merkleyeapi.Decode(s.api.Gen().GetScanStatus(ctx))
 			},
 		},
 		{
