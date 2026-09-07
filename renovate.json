@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Repo-specific Renovate config for mcp-server.",
+    "The extends below names Merkleye's org policy explicitly rather than relying only on Renovate's config inheritance. Inheritance is already applying it -- PR #9 arrived here labelled `dependencies`, on branch `renovate/go-minor`, as `chore(deps):`, on the Monday schedule, for an *indirect* Go dependency that Renovate skips by default, all while this repository had no config file at all. The explicit reference makes that dependency visible in the tree and survives the org-level inheritance setting being changed or unset.",
+    "The cost is that the policy is applied twice while inheritance is also on: packageRules concatenate rather than replace, so the 22 org rules arrive from the inherited layer and again from this preset, giving 45 instead of 23. The duplicates are identical and idempotent, and the go-yit rule below still resolves last, so behaviour is unchanged -- it is redundancy, not conflict.",
+    "org-inherited-config.json carries a hostRules entry templating {{ secrets.GH_PACKAGES_TOKEN }}. That is a global-scope secret in this org's Renovate configuration, and global secrets are in scope when repository config is resolved, so it substitutes normally here -- verified against the real file. Noted only because it is the first thing to check if Renovate ever goes quiet on this repository after a change to the org policy file: a secret in that position that is not resolvable at repository scope aborts the run with `config-validation: Unknown secrets name`, and the symptom is silence plus a generic \"Action Required\" issue rather than a useful error."
+  ],
+  "extends": [
+    "local>Merkleye/renovate-config//org-inherited-config"
+  ],
+  "packageRules": [
+    {
+      "description": [
+        "Hold github.com/dprotaso/go-yit at its 2022 digest. Newer digests move it from gopkg.in/yaml.v3 to go.yaml.in/yaml/v4, which then does not compile against its only consumer in this module graph: github.com/vmware-labs/yaml-jsonpath@v0.3.2, unmaintained since 2021-06-15 and still on yaml.v3. Both upstreams that could fix it are already at their newest releases -- oapi-codegen v2.8.0 and speakeasy-api/openapi v1.25.1 -- so no combination of versions takes the update and still builds. Full analysis and reproduction: https://github.com/Merkleye/mcp-server/pull/9",
+        "The scope is one package on purpose. go-yit is reached only through oapi-codegen, which is a go.mod tool directive, so this is build-time only -- it is never linked into merkleye-mcp and carries no runtime or security exposure. Disabling it costs nothing operationally and nothing else in the graph is affected.",
+        "This rule is declared directly rather than in the preset above, so it is evaluated after every inherited and extended rule -- including the org's rule enabling gomod indirect dependencies, which it needs to override for this one package.",
+        "Remove this rule when any one of these becomes true: yaml-jsonpath is maintained again or migrates to yaml/v4; speakeasy-api/openapi drops its yaml-jsonpath dependency; oapi-codegen drops or replaces the overlay loader; or this repository moves off oapi-codegen."
+      ],
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["github.com/dprotaso/go-yit"],
+      "enabled": false
+    }
+  ]
+}
