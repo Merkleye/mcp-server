@@ -106,4 +106,4 @@ put the commit in `api/SPEC_VERSION`, and run `mise run generate && mise run che
 
 ## License
 
-Apache-2.0, matching the core repository.
+Apache-2.0
