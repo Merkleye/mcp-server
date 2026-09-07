@@ -75,9 +75,39 @@ case "$status" in
 		exit 1
 		;;
 	404)
-		echo "GitHub returned 404 for api/openapi.yaml at ${pin}." >&2
-		echo "Either the commit in ${PIN_FILE} does not exist (a deleted branch, or a" >&2
-		echo "squash-merged commit that was re-hashed), or the token cannot see it." >&2
+		# GitHub answers 404 rather than 403 for a private repository the token
+		# cannot see, so as to not leak its existence. That makes "your token
+		# lacks access" and "that commit does not exist" the same status code.
+		# One extra request tells them apart, which is the difference between a
+		# five-minute fix and an afternoon.
+		repo_status="$(curl -sSL --max-time 30 \
+			-H "Authorization: Bearer ${token}" \
+			-H "X-GitHub-Api-Version: 2022-11-28" \
+			-w '%{http_code}' "https://api.github.com/repos/merkleye/merkleye" \
+			-o /dev/null 2>/dev/null || echo "000")"
+
+		if [ "$repo_status" != "200" ]; then
+			cat >&2 <<MSG
+The token cannot read merkleye/merkleye (GET /repos/merkleye/merkleye returned
+HTTP ${repo_status}).
+
+merkleye is private, and GitHub answers 404 rather than 403 for a private
+repository a token cannot see -- so this is an access problem, not a bad pin.
+
+In GitHub Actions the default GITHUB_TOKEN is scoped to this repository only
+and can never read merkleye. Set MERKLEYE_SPEC_TOKEN to a PAT or App token with
+read access to merkleye/merkleye, as a repository secret.
+MSG
+		else
+			cat >&2 <<MSG
+The token can read merkleye/merkleye, but api/openapi.yaml does not exist at
+${pin}.
+
+The commit in ${PIN_FILE} is wrong: most likely it names a branch commit that
+was squash-merged (which re-hashes it) and whose branch has since been deleted.
+Re-pin to the merged commit on merkleye's main.
+MSG
+		fi
 		exit 1
 		;;
 	*)
