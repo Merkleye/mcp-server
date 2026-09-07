@@ -92,6 +92,45 @@ case "$status" in
 			-o /dev/null 2>/dev/null || echo "000")"
 
 		if [ "$repo_status" != "200" ]; then
+			# Name the credential. "A token cannot read merkleye" is a fact;
+			# "the token is acting as <who>, with these scopes" is usually the
+			# fix, because the wrong identity or a missing scope is visible at a
+			# glance. Never prints the token itself.
+			whoami_body="$(mktemp)"
+			whoami_headers="$(mktemp)"
+			whoami_status="$(curl -sSL --max-time 30 \
+				-H "Authorization: Bearer ${token}" \
+				-H "X-GitHub-Api-Version: 2022-11-28" \
+				-D "$whoami_headers" -o "$whoami_body" \
+				-w '%{http_code}' "https://api.github.com/user" 2>/dev/null || echo "000")"
+
+			identity="could not be determined"
+			case "$whoami_status" in
+				200)
+					login="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("login","?"))' "$whoami_body" 2>/dev/null || echo "?")"
+					identity="a user token acting as '${login}'"
+					;;
+				403 | 401)
+					# App installation tokens have no /user; that is expected,
+					# and points at a different fix (install the App).
+					identity="most likely a GitHub App installation token (no /user identity)"
+					;;
+			esac
+
+			# Classic PATs advertise their scopes on every response; fine-grained
+			# ones send the header empty, which is itself a useful signal.
+			scopes="$(grep -i '^x-oauth-scopes:' "$whoami_headers" 2>/dev/null | cut -d: -f2- | tr -d '\r' | sed 's/^ *//')"
+			rm -f "$whoami_body" "$whoami_headers"
+
+			echo "Credential in use: ${identity}." >&2
+			if [ -n "$scopes" ]; then
+				echo "Classic PAT scopes: ${scopes} (reading a private repo needs 'repo')." >&2
+			else
+				echo "No x-oauth-scopes header: a fine-grained PAT or an App token." >&2
+				echo "Fine-grained PATs must list merkleye/merkleye explicitly and grant Contents: Read." >&2
+			fi
+			echo >&2
+
 			cat >&2 <<MSG
 The token cannot read merkleye/merkleye (GET /repos/merkleye/merkleye returned
 HTTP ${repo_status}).
