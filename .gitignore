@@ -4,7 +4,17 @@
 # a contract drift waiting to happen. `mise run generate` after a clone.
 /internal/merkleyeapi/client.gen.go
 
-# Build artifact: api/openapi.yaml with the empty-string parameter unions
+# merkleye's OpenAPI spec, and the marker recording which pinned commit the
+# local copy came from.
+#
+# This is merkleye's private product contract and is deliberately NOT stored in
+# this repository — not vendored, not committed, not in history. The build
+# fetches it from the commit pinned in api/SPEC_VERSION (a bare SHA, which
+# discloses nothing). See scripts/fetch-spec.sh.
+/api/openapi.yaml
+/api/.spec-fetched-at
+
+# Build artifact: the fetched spec with its empty-string parameter unions
 # collapsed so oapi-codegen can generate from it. See scripts/prepare-spec.py.
 /api/openapi.codegen.yaml
 

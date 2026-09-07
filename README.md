@@ -7,7 +7,13 @@ Puts Merkleye's findings in front of an LLM agent — *"what lookalike
 certificates showed up for our domains this week, which are real, acknowledge
 the noise"* — as MCP tools, resources and prompts. It is a client of the
 Merkleye API and owns no data of its own; the whole surface is derived from
-`api/openapi.yaml` in the core repo, which is the product boundary.
+merkleye's OpenAPI contract, which is the product boundary.
+
+**That contract is not stored here.** It is merkleye's private product
+boundary, so this repository holds only the commit it is pinned to
+(`api/SPEC_VERSION`, a bare SHA) and fetches the spec at build time. Building
+therefore needs a token that can read `merkleye/merkleye` — see
+[Development](#development).
 
 ## Status
 
@@ -86,16 +92,21 @@ could not.
 ## Development
 
 ```bash
+export MERKLEYE_SPEC_TOKEN=<token that can read merkleye/merkleye>
+
 mise install       # provision the pinned toolchain
-mise run generate  # generate the API client from api/openapi.yaml
-mise run check     # fmt + vet + lint + govulncheck + tests + spec drift
+mise run generate  # fetch the pinned spec, then generate the API client
+mise run check     # fmt + vet + lint + govulncheck + tests
 ```
 
-The client is generated from the upstream spec vendored at
-[`api/openapi.yaml`](api/openapi.yaml), pinned by commit in
-[`api/SPEC_VERSION`](api/SPEC_VERSION) and verified against upstream by
-`mise run spec`. To move to a newer merkleye: copy its `api/openapi.yaml` in,
-put the commit in `api/SPEC_VERSION`, and run `mise run generate && mise run check`.
+`mise run generate` fetches merkleye's OpenAPI spec from the commit pinned in
+[`api/SPEC_VERSION`](api/SPEC_VERSION), validates it, and generates the client
+from it. Neither the spec nor the generated client (~22k lines) is committed.
+
+To move to a newer merkleye: put the new commit SHA in `api/SPEC_VERSION` and
+run `mise run generate && mise run check`. There is no vendored copy to re-sync
+and no drift to check, because the build always reads the pinned upstream
+commit directly.
 
 `mise.toml` owns tools *and* tasks, and CI runs the same tasks.
 
@@ -106,4 +117,7 @@ put the commit in `api/SPEC_VERSION`, and run `mise run generate && mise run che
 
 ## License
 
-Apache-2.0
+**Not yet decided.** This repository previously carried an Apache-2.0 LICENSE
+copied from the core repository. That was wrong — merkleye is not open source —
+so the file has been removed. Until a licence is chosen, treat this code as
+proprietary with all rights reserved.

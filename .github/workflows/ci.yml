@@ -12,36 +12,59 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every action is pinned to a commit SHA, never a tag. A tag is mutable: the
+# owner can repoint v4 at any commit, and every workflow tracking it runs new
+# code with no diff and no review. The trailing comment records which release
+# the SHA was, so Renovate can bump both together.
+#
+# MERKLEYE_SPEC_TOKEN is required, not optional. merkleye's OpenAPI spec is
+# private and deliberately not stored in this repository, so nothing here can
+# generate the API client without a credential that can read merkleye/merkleye.
+# The default GITHUB_TOKEN is scoped to this repository and will not do; supply
+# a PAT or App token as a repository secret.
+
 jobs:
   check:
     name: Backend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # mise provisions the exact toolchain pinned in mise.toml, and CI runs
-      # the same tasks a contributor runs locally — there is no second
-      # definition of what "check" means.
-      - uses: jdx/mise-action@v2
+      # pyyaml is for scripts/prepare-spec.py and the validation inside
+      # scripts/fetch-spec.sh.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          version: 2026.8.1
+          python-version: "3.14"
+      - run: pip install pyyaml
+
+      # mise provisions the toolchain pinned in mise.toml, and CI runs the same
+      # tasks a contributor runs locally — there is no second definition of
+      # what "check" means.
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.9.1
           install: true
           cache: true
 
-      - run: mise run generate
+      # Fetches the spec from the commit pinned in api/SPEC_VERSION, validates
+      # it, then generates the client from it.
+      - name: Generate the API client
+        env:
+          MERKLEYE_SPEC_TOKEN: ${{ secrets.MERKLEYE_SPEC_TOKEN }}
+        run: mise run generate
+
       - run: mise run fmt-check
       - run: mise run vet
 
-      # Lint goes through the action rather than `mise run lint`, matching
-      # merkleye. The golangci-lint release pinned in mise.toml is itself built
-      # with an older Go than this module targets, and refuses to load a
-      # newer-than-itself language version ("the Go language version used to
-      # build golangci-lint is lower than the targeted Go version"). The action
-      # fetches a build that matches the runner's toolchain. `mise run lint`
-      # stays for local use and starts working once the pinned release catches
-      # up — see AGENTS.md.
+      # Lint goes through the action rather than `mise run lint`. The
+      # golangci-lint release pinned in mise.toml is itself built with an older
+      # Go than this module targets and refuses to load it ("the Go language
+      # version used to build golangci-lint is lower than the targeted Go
+      # version"); the action fetches a build matching the runner's toolchain.
+      # `mise run lint` stays for local use and starts working once the pinned
+      # release catches up — see AGENTS.md.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           args: --timeout=5m
 
@@ -51,47 +74,42 @@ jobs:
     name: Vulnerabilities
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          version: 2026.8.1
+          python-version: "3.14"
+      - run: pip install pyyaml
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.9.1
           install: true
           cache: true
-      - run: mise run govulncheck
-
-  spec:
-    name: OpenAPI spec drift
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install pyyaml
-
-      # The authoritative drift gate. The local hook skips this when it cannot
-      # reach the network; here it always runs, because a vendored spec that
-      # has quietly diverged from upstream is the exact failure this repo's
-      # split exists to prevent — the client would generate cleanly against a
-      # contract the server no longer serves.
-      # merkleye is private, so this needs a credential that can read it — the
-      # default GITHUB_TOKEN is scoped to this repository only. Without one the
-      # script skips rather than fails, which would make this job silently
-      # stop checking; set MERKLEYE_SPEC_TOKEN (a PAT or App token with read
-      # access to merkleye/merkleye) as a repository secret.
-      - name: Verify the vendored spec matches its pinned upstream
+      - name: Check for known vulnerabilities
         env:
           MERKLEYE_SPEC_TOKEN: ${{ secrets.MERKLEYE_SPEC_TOKEN }}
-        run: ./scripts/check-spec-drift.sh
+        run: mise run govulncheck
 
   build:
     name: Build image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+      - run: pip install pyyaml
+
+      # The spec is fetched here rather than inside the build, so the token
+      # never reaches the builder or any layer. The build stage consumes it and
+      # the final image contains only the compiled binary.
+      - name: Fetch the pinned OpenAPI spec
+        env:
+          MERKLEYE_SPEC_TOKEN: ${{ secrets.MERKLEYE_SPEC_TOKEN }}
+        run: ./scripts/fetch-spec.sh
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Containerfile

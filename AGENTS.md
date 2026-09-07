@@ -60,23 +60,28 @@ data, and it authorizes nothing.
   a variant's `registration` is RDAP's answer and `ns_resolves` is DNS's.
 - The generated client (`internal/merkleyeapi/client.gen.go`) is not committed
   and never hand-edited. `mise run generate` after a clone.
-- **`api/openapi.yaml` is never edited.** It is the upstream artifact, byte-
-  identical to the commit in `api/SPEC_VERSION`, and `mise run spec` proves it.
-  When the spec declares something the generator cannot handle, the fix goes in
-  `scripts/prepare-spec.py`, which writes a gitignored build copy — never in the
-  vendored file, because an edit there either breaks the drift check or gets
-  absorbed by re-pinning, and then the client is generated against a contract
-  merkleye does not serve.
+- **merkleye's OpenAPI spec is never stored in this repository.** Not vendored,
+  not committed, not in history. It is merkleye's private product contract and
+  is not ours to redistribute. `api/openapi.yaml` is gitignored and written by
+  `scripts/fetch-spec.sh` from the commit in `api/SPEC_VERSION` — a bare SHA,
+  which discloses nothing. If you ever find yourself about to `git add` it, the
+  answer is no.
+- **The spec is never edited either.** When it declares something the generator
+  cannot handle, the fix goes in `scripts/prepare-spec.py`, which writes a
+  gitignored build copy. Patching the fetched file would be patching a
+  contract merkleye actually serves, and the next fetch would silently undo it.
 - `mise.toml` owns tools *and* tasks; CI runs the same tasks. Container images
   use `Containerfile`, not `Dockerfile`.
 
 ## Upgrading to a newer merkleye
 
-1. Copy its `api/openapi.yaml` over ours and put the commit in
-   `api/SPEC_VERSION`.
-2. `mise run generate` — `scripts/prepare-spec.py` runs first and reports how
-   many parameter unions it collapsed. A warning about an `anyOf` it left alone
-   is the thing to read: an unhandled union is how `undefined: N0` comes back.
+1. Put the new commit SHA in `api/SPEC_VERSION`. That is the whole change —
+   there is no vendored copy to re-sync and no drift to check, because the
+   build reads the pinned upstream commit directly.
+2. `mise run generate` — it fetches and validates the spec, then
+   `scripts/prepare-spec.py` reports how many parameter unions it collapsed. A
+   warning about an `anyOf` it left alone is the thing to read: an unhandled
+   union is how `undefined: N0` comes back.
 3. `mise run check`, then fix what the compiler objects to. Contract changes
    arrive as type errors, which is the point of generating rather than
    hand-writing the client.
@@ -137,19 +142,18 @@ schema allows, a projection that drops a field triage needs, or an auth path
 that works against a fake and not against the real thing. Two gates cover that,
 and neither is optional:
 
-- **Spec drift** (`mise run spec`, and CI's `spec` job) proves the vendored
-  `api/openapi.yaml` still matches the upstream commit pinned in
-  `api/SPEC_VERSION`. A silently-diverged copy generates a client cleanly
-  against a contract the server no longer serves.
+- **The spec fetch** (`mise run generate`) is the contract gate. It reads the
+  pinned commit directly, so a stale or diverged local copy is not a failure
+  mode that exists any more; instead the failure mode is a bad pin, and the
+  fetch fails loudly on a 404 rather than falling back to anything.
 
-  merkleye is private, so this needs a token that can read it —
-  `MERKLEYE_SPEC_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN`. Without one the script
-  skips, so that a local hook works offline; CI sets `MERKLEYE_SPEC_TOKEN` and
-  is the authoritative gate. **Note that the default `GITHUB_TOKEN` in Actions
-  is scoped to this repository only** and cannot read merkleye — a PAT or App
-  token is required, or the job skips while appearing to pass.
+  It needs a token that can read merkleye — `MERKLEYE_SPEC_TOKEN`, `GH_TOKEN`
+  or `GITHUB_TOKEN`, in that order — and **fails without one**, deliberately:
+  there is nothing to build against. Note the default `GITHUB_TOKEN` in Actions
+  is scoped to this repository only and cannot read merkleye, so CI needs
+  `MERKLEYE_SPEC_TOKEN` as a repository secret.
 
-  When an upstream spec PR merges, re-pin to the *merged* commit on `main`, not
+  When an upstream spec PR merges, pin to the *merged* commit on `main`, not
   the branch commit: a squash merge gives the change a new SHA and the branch
   is usually deleted, so the old pin 404s.
 - **A live E2E pass before anything ships.** Run the binary against a real

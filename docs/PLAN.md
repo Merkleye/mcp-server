@@ -10,10 +10,14 @@ front of an LLM agent: "what lookalike certs showed up for our domains this
 week, which are real, acknowledge the noise." It is a client of the Merkleye
 API and owns no data of its own.
 
-The whole surface derives from `api/openapi.yaml` in
-[`merkleye/merkleye`](https://github.com/merkleye/merkleye) — that spec is the
-product boundary, and the discipline merkleye-ui follows (generate the client
-in CI, fail the build on drift) applies here too.
+The whole surface derives from merkleye's OpenAPI contract — that spec is the
+product boundary.
+
+**It is never stored in this repository.** It is merkleye's private contract
+and not ours to redistribute, so this repo holds only the commit it is pinned
+to (`api/SPEC_VERSION`, a bare SHA) and fetches the spec at build time from
+`merkleye/merkleye`. Everything below that says "vendored" describes an earlier
+design; §3.1 is the current one.
 
 ---
 
@@ -59,7 +63,7 @@ node           = "22"       # npm distribution (§5.2), not implementation
 | --- | --- | --- |
 | Language | Go 1.27 | Same toolchain, lint config and container story as merkleye; the API client generates from the same spec. |
 | MCP SDK | `github.com/modelcontextprotocol/go-sdk` **v1.7.0** | Official SDK. Supports protocol `2026-07-28` down to `2024-11-05`. Note that the legacy `initialize` handshake is capped at `2025-11-25` by the SDK on purpose — `initialize` is deprecated in `2026-07-28`, which is reached through the newer discovery path — so a client using `initialize` reports `2025-11-25`, and that is correct rather than a misconfiguration. Ships `auth.RequireBearerToken` (pluggable `TokenVerifier`, emits the RFC 9728 `WWW-Authenticate` challenge) and `auth.ProtectedResourceMetadataHandler` — the two pieces §4 needs, rather than hand-rolled. |
-| API client | generated from a pinned `openapi.yaml` | §3.1 |
+| API client | generated at build time from the pinned upstream commit | §3.1 |
 | Transports | Streamable HTTP + stdio | §5 |
 | Container | `Containerfile`, not `Dockerfile` | merkleye convention. |
 
@@ -72,7 +76,8 @@ internal/auth/           # inbound credential handling (§4)
 internal/merkleyeapi/    # generated client + otelhttp wrapper
 internal/config/         # strict YAML validation, errors naming the bad key
 internal/telemetry/      # OTEL wiring, mirrors merkleye's
-api/openapi.yaml         # pinned copy of the upstream spec (§3.1)
+api/SPEC_VERSION         # the upstream commit to build against (§3.1)
+#                          api/openapi.yaml is fetched here, never committed
 npm/                     # thin launcher package (§5.2) — no Node implementation
 ```
 
@@ -101,11 +106,19 @@ read or write anything a caller could not.
 
 ### 3.1 Keeping the client honest
 
-`api/openapi.yaml` is vendored at a pinned upstream version; `mise run
-generate` regenerates the client (`oapi-codegen`). CI adds a **drift job**:
-fetch the spec from the pinned merkleye release artifact, diff against the
-vendored copy, fail on difference. A silently-broken integration becomes a red
-build — the reason the two-repo split exists at all.
+`scripts/fetch-spec.sh` reads `api/SPEC_VERSION` and pulls
+`api/openapi.yaml` from that exact commit of `merkleye/merkleye`; `mise run
+generate` then regenerates the client (`oapi-codegen`). The fetched spec is
+gitignored and never committed.
+
+There is deliberately **no drift check**, because there is nothing to drift:
+the build reads the pinned upstream commit directly, so the client is always
+generated from exactly the contract that commit serves. The failure mode that
+replaces drift is a bad pin, and the fetch fails loudly on a 404 rather than
+falling back to anything.
+
+The cost is that a build now needs a credential that can read merkleye. That is
+the right trade: this repo cannot hold merkleye's product contract.
 
 ### 3.2 `operationId`s — what they are, and why we want them upstream
 
@@ -453,8 +466,8 @@ stream is lossless.
   opaque token shaped like a JWT, JWT shaped like an opaque token, exchange
   returning 401/403/500, exchange latency and cache expiry races, a cached
   token expiring mid-call.
-- **Contract** — the generated client compiles against the vendored spec, and
-  the drift job (§3.1) proves the vendored spec is the real one.
+- **Contract** — the generated client compiles against the spec fetched from
+  the pinned upstream commit, which is by construction the real one (§3.1).
 - **Conformance** — MCP Inspector against a running server, both transports.
 - **Client compatibility, per release** — Claude Code over http and stdio,
   Claude Desktop connector and stdio, LiteLLM `auth_type: bearer_token` and
@@ -469,7 +482,7 @@ stream is lossless.
 
 | Phase | Contents | Done when |
 | --- | --- | --- |
-| 0 | ✅ Repo scaffold, mise tools + tasks, CI, vendored spec, generated client, drift check | Done |
+| 0 | ✅ Repo scaffold, mise tools + tasks, CI, build-time spec fetch, generated client | Done |
 | 1 | ✅ stdio transport, bearer pass-through, read tools. npm launcher still outstanding | Done bar the npm launcher; verified end to end over stdio against a stub API |
 | 2 | 🟡 **Here:** Streamable HTTP, protected resource metadata, 401 challenge, exchange seam + cache — all built and verified. **Upstream, still to do:** the exchange route, `auth/config` discovery fields, DCR shim (§4.4). Until then `UnimplementedExchanger` refuses OIDC sign-in with an explanation | Blocked on the upstream PR. Live E2E against a real IdP still required |
 | 3 | ✅ Write tools behind `read_only`, destructive tools behind `destructive`, resources, prompts | Done; live E2E against a real merkleyed still required |

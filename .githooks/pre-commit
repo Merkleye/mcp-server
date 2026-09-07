@@ -37,7 +37,10 @@ if [[ -n "$unformatted" ]]; then
 	exit 1
 fi
 
+# No spec step: there is no vendored spec to drift from any more. The upstream
+# contract is fetched fresh from the pinned commit by `mise run generate`, which
+# validates it — so all a hook could add here is a network round trip and a hard
+# dependency on a token being present to make a local commit.
 run_step "lint" golangci-lint lint
 run_step "vet" go vet
 run_step "unit tests" go test
-run_step "spec drift" bash spec
