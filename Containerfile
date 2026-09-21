@@ -7,7 +7,7 @@
 # doing so would mean handing a GitHub token to the builder. Run
 # `./scripts/fetch-spec.sh` first (it needs MERKLEYE_BACKEND_TOKEN); the spec is
 # consumed by the build stage only and never reaches the final image.
-FROM golang:1.27-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build
+FROM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
 
 WORKDIR /src
 
