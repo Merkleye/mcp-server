@@ -52,7 +52,7 @@ jobs:
       # scripts/fetch-spec.sh.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
       - run: pip install pyyaml
 
       # mise provisions the toolchain pinned in mise.toml, and CI runs the same
@@ -60,7 +60,7 @@ jobs:
       # what "check" means.
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.9.1
+          version: 2026.10.8
           install: true
           cache: true
 
@@ -95,11 +95,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
       - run: pip install pyyaml
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.9.1
+          version: 2026.10.8
           install: true
           cache: true
       - name: Check for known vulnerabilities
@@ -114,7 +114,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
       - run: pip install pyyaml
 
       # The spec is fetched here rather than inside the build, so the token
@@ -123,9 +123,9 @@ jobs:
       - name: Fetch the pinned OpenAPI spec
         run: ./scripts/fetch-spec.sh
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: ./Containerfile
