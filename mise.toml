@@ -7,8 +7,8 @@
 # Kept in sync by hand with go.mod's `go` directive, and with merkleye's
 # mise.toml — this repo generates its API client from merkleye's spec, so a
 # toolchain split between them shows up as a generation failure.
-go = "1.27.1"
-golangci-lint = "2.13.2"
+go = "1.27.2"
+golangci-lint = "2.14.0"
 # The client generator and the vulnerability scanner are go.mod `tool`
 # dependencies, not mise tools: the container build has no mise, and two pins
 # for one binary is one pin too many. `go tool` resolves both from go.mod, so
