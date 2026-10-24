@@ -58,7 +58,7 @@ jobs:
       # mise provisions the toolchain pinned in mise.toml, and CI runs the same
       # tasks a contributor runs locally — there is no second definition of
       # what "check" means.
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e # v5
         with:
           version: 2026.10.8
           install: true
@@ -97,7 +97,7 @@ jobs:
         with:
           python-version: "3.15"
       - run: pip install pyyaml
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e # v5
         with:
           version: 2026.10.8
           install: true
